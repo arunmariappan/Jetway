@@ -102,3 +102,48 @@ pub fn chat(stream: bool) -> serde_json::Value {
         "stream": stream,
     })
 }
+
+/// The whole of `jetway serve` (store, metrics, admin listener) against a fake Ollama, with a temporary database.
+pub struct Stack {
+    pub fake: FakeOllama,
+    pub running: Option<jetway::app::Running>,
+    pub url: String,
+    pub admin_url: String,
+    pub records: Collect,
+    pub client: reqwest::Client,
+    pub dir: tempfile::TempDir,
+}
+
+impl Stack {
+    pub async fn start_with(edit: impl FnOnce(&mut Config)) -> Self {
+        let fake = fake_ollama::spawn_local(Script::default()).await.unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let mut config = Config::default();
+        config.upstream.url = fake.url();
+        config.server.shutdown_grace_seconds = 2;
+        config.store.path = dir.path().join("jetway.db");
+        edit(&mut config);
+        let records = Collect::default();
+        let gateway = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let admin = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let running = jetway::app::start(config, gateway, admin, vec![Arc::new(records.clone())]).await.unwrap();
+        let url = format!("http://{}", running.gateway_addr);
+        let admin_url = format!("http://{}", running.admin_addr);
+        Self { fake, running: Some(running), url, admin_url, records, client: client(), dir }
+    }
+
+    pub fn running(&self) -> &jetway::app::Running {
+        self.running.as_ref().unwrap()
+    }
+
+    pub fn post(&self, path: &str, body: serde_json::Value) -> reqwest::RequestBuilder {
+        self.client.post(format!("{}{path}", self.url)).json(&body)
+    }
+
+    /// Waits for `n` finished exchanges and for the store to have written them.
+    pub async fn settle(&self, n: usize) -> Vec<Finished> {
+        let finished = self.records.wait_for(n).await;
+        self.running().store.flush().await.unwrap();
+        finished
+    }
+}
