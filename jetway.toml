@@ -1,0 +1,17 @@
+# Jetway's committed defaults. JETWAY__* environment variables override any value here
+# (`JETWAY__SERVER__PORT=9000` sets server.port). Later phases add their sections; see docs/plan/README.md §5.
+
+[server]
+host = "127.0.0.1"
+port = 8300                        # gateway: Ollama and OpenAI-compatible APIs
+admin_port = 8301                  # dashboard, admin API, /metrics
+max_request_bytes = 67_108_864     # 64 MiB; image inputs are base64
+shutdown_grace_seconds = 30
+
+[upstream]
+name = "ollama"
+url = "http://127.0.0.1:11434"     # 127.0.0.1, never localhost (Windows tries ::1 first)
+connect_timeout_ms = 2000
+first_byte_timeout_seconds = 600   # long prompts on a busy GPU
+idle_timeout_seconds = 120         # longest silence between stream chunks
+slots = 1                          # requests sent at once (phase 9)
