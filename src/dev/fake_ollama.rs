@@ -106,14 +106,7 @@ impl Events {
         self.all()
             .into_iter()
             .filter_map(|e| match e {
-                Event::Request {
-                    id,
-                    method,
-                    path,
-                    headers,
-                    body,
-                    ..
-                } => Some((id, method, path, headers, body)),
+                Event::Request { id, method, path, headers, body, .. } => Some((id, method, path, headers, body)),
                 _ => None,
             })
             .collect()
@@ -174,10 +167,7 @@ impl FakeOllama {
 pub fn spawn(listener: TcpListener, default_script: Script) -> std::io::Result<FakeOllama> {
     let addr = listener.local_addr()?;
     let events = Events::default();
-    let state = FakeState {
-        events: events.clone(),
-        default_script,
-    };
+    let state = FakeState { events: events.clone(), default_script };
     let (stop, stopped) = oneshot::channel::<()>();
     let app = Router::new().fallback(handle).with_state(state);
     let listener = listener.tap_io(|tcp| {
@@ -190,11 +180,7 @@ pub fn spawn(listener: TcpListener, default_script: Script) -> std::io::Result<F
             })
             .await;
     });
-    Ok(FakeOllama {
-        addr,
-        events,
-        _stop: stop,
-    })
+    Ok(FakeOllama { addr, events, _stop: stop })
 }
 
 /// Starts a fake Ollama on a free port of 127.0.0.1.
@@ -212,10 +198,7 @@ struct DisconnectGuard {
 impl Drop for DisconnectGuard {
     fn drop(&mut self) {
         if !self.done {
-            self.events.push(Event::Disconnected {
-                id: self.id,
-                at: Instant::now(),
-            });
+            self.events.push(Event::Disconnected { id: self.id, at: Instant::now() });
         }
     }
 }
@@ -239,11 +222,7 @@ async fn handle(State(state): State<FakeState>, request: Request) -> Response {
         .and_then(|v| serde_json::from_slice::<Script>(v.as_bytes()).ok())
         .unwrap_or_else(|| state.default_script.clone());
 
-    let mut guard = DisconnectGuard {
-        events: state.events.clone(),
-        id,
-        done: false,
-    };
+    let mut guard = DisconnectGuard { events: state.events.clone(), id, done: false };
     if script.ttfb_ms > 0 {
         tokio::time::sleep(Duration::from_millis(script.ttfb_ms)).await;
     }
@@ -270,19 +249,11 @@ async fn handle(State(state): State<FakeState>, request: Request) -> Response {
     match reply {
         Reply::Whole(content_type, body) => {
             guard.done = true;
-            state.events.push(Event::ChunkSent {
-                id,
-                at: Instant::now(),
-                bytes: Bytes::from(body.clone()),
-            });
+            state.events.push(Event::ChunkSent { id, at: Instant::now(), bytes: Bytes::from(body.clone()) });
             state.events.push(Event::Finished { id, at: Instant::now() });
             respond(StatusCode::OK, content_type, Body::from(body))
         }
-        Reply::Stream {
-            content_type,
-            items,
-            finals,
-        } => {
+        Reply::Stream { content_type, items, finals } => {
             guard.done = true; // the stream's own guard takes over from here
             let stream = scripted_stream(state.events.clone(), id, &script, items, finals);
             respond(StatusCode::OK, content_type, Body::from_stream(stream))
@@ -293,9 +264,7 @@ async fn handle(State(state): State<FakeState>, request: Request) -> Response {
 fn respond(status: StatusCode, content_type: &'static str, body: Body) -> Response {
     let mut response = Response::new(body);
     *response.status_mut() = status;
-    response
-        .headers_mut()
-        .insert(CONTENT_TYPE, HeaderValue::from_static(content_type));
+    response.headers_mut().insert(CONTENT_TYPE, HeaderValue::from_static(content_type));
     response
 }
 
@@ -318,19 +287,12 @@ fn stream_reply(content_type: &'static str, text: &str, final_count: usize) -> R
     let separator = if content_type == SSE { "\n\n" } else { "\n" };
     let mut items: Vec<String> = text.split_inclusive(separator).map(str::to_string).collect();
     let finals = items.split_off(items.len().saturating_sub(final_count));
-    Reply::Stream {
-        content_type,
-        items,
-        finals,
-    }
+    Reply::Stream { content_type, items, finals }
 }
 
 fn reply_for(method: &Method, path: &str, request: &serde_json::Value) -> Option<Reply> {
     let flag = |name: &str| request.get(name).and_then(serde_json::Value::as_bool);
-    let model = request
-        .get("model")
-        .and_then(serde_json::Value::as_str)
-        .unwrap_or("qwen3.5:4b");
+    let model = request.get("model").and_then(serde_json::Value::as_str).unwrap_or("qwen3.5:4b");
     let has = |name: &str| request.get(name).is_some_and(|v| !v.is_null());
     // Ollama streams unless told not to; the OpenAI API streams only when asked (spike S1).
     let native_stream = flag("stream").unwrap_or(true);
@@ -349,9 +311,7 @@ fn reply_for(method: &Method, path: &str, request: &serde_json::Value) -> Option
         "/api/generate" if native_stream => stream_reply(NDJSON, fixture!("generate-stream.ndjson"), 1),
         "/api/generate" => Reply::Whole(JSON, fixture!("generate.json").into()),
         "/v1/chat/completions" if openai_stream => {
-            let usage = request
-                .pointer("/stream_options/include_usage")
-                .and_then(serde_json::Value::as_bool);
+            let usage = request.pointer("/stream_options/include_usage").and_then(serde_json::Value::as_bool);
             if usage == Some(true) {
                 stream_reply(SSE, fixture!("openai-chat-stream-usage.sse"), 3)
             } else {
@@ -415,11 +375,8 @@ fn input_count(request: &serde_json::Value) -> usize {
 /// Plays a stream according to the script on a task, so gaps happen in real time.
 fn scripted_stream(events: Events, id: usize, script: &Script, items: Vec<String>, finals: Vec<String>) -> FakeBody {
     let content_count = script.chunks.unwrap_or(items.len());
-    let mut sequence: Vec<String> = if items.is_empty() {
-        Vec::new()
-    } else {
-        items.iter().cycle().take(content_count).cloned().collect()
-    };
+    let mut sequence: Vec<String> =
+        if items.is_empty() { Vec::new() } else { items.iter().cycle().take(content_count).cloned().collect() };
     sequence.extend(finals);
     let mut chunks: Vec<Bytes> = Vec::new();
     for item in sequence {
@@ -457,22 +414,11 @@ fn scripted_stream(events: Events, id: usize, script: &Script, items: Vec<String
             if tx.send(Ok(chunk.clone())).await.is_err() {
                 return;
             }
-            task_events.push(Event::ChunkSent {
-                id,
-                at: sent_at,
-                bytes: chunk,
-            });
+            task_events.push(Event::ChunkSent { id, at: sent_at, bytes: chunk });
         }
         task_events.push(Event::Finished { id, at: Instant::now() });
     });
-    FakeBody {
-        rx,
-        guard: DisconnectGuard {
-            events,
-            id,
-            done: false,
-        },
-    }
+    FakeBody { rx, guard: DisconnectGuard { events, id, done: false } }
 }
 
 struct FakeBody {

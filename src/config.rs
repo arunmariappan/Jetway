@@ -99,11 +99,7 @@ pub enum ConfigError {
 }
 
 fn bullet_list(problems: &[String]) -> String {
-    problems
-        .iter()
-        .map(|p| format!("  - {p}"))
-        .collect::<Vec<_>>()
-        .join("\n")
+    problems.iter().map(|p| format!("  - {p}")).collect::<Vec<_>>().join("\n")
 }
 
 impl Config {
@@ -149,10 +145,7 @@ impl Config {
 
         let upstream = &self.upstream;
         if !is_valid_name(&upstream.name) {
-            problems.push(format!(
-                "upstream.name {:?} must match [a-z0-9-]{{1,32}}",
-                upstream.name
-            ));
+            problems.push(format!("upstream.name {:?} must match [a-z0-9-]{{1,32}}", upstream.name));
         }
         if let Err(problem) = check_upstream_url(&upstream.url) {
             problems.push(format!("upstream.url {:?}: {problem}", upstream.url));
@@ -181,20 +174,13 @@ impl Config {
             }
         }
 
-        if problems.is_empty() {
-            Ok(())
-        } else {
-            Err(ConfigError::Invalid(problems))
-        }
+        if problems.is_empty() { Ok(()) } else { Err(ConfigError::Invalid(problems)) }
     }
 }
 
 /// App and upstream names: lowercase letters, digits and hyphens, 1 to 32 characters.
 pub fn is_valid_name(name: &str) -> bool {
-    (1..=32).contains(&name.len())
-        && name
-            .bytes()
-            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
+    (1..=32).contains(&name.len()) && name.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
 }
 
 fn check_upstream_url(url: &str) -> Result<(), String> {
@@ -203,11 +189,9 @@ fn check_upstream_url(url: &str) -> Result<(), String> {
         return Err("the scheme must be http or https".into());
     }
     if parsed.host_str() == Some("localhost") {
-        return Err(
-            "use 127.0.0.1 instead of localhost: Windows tries ::1 first, and a refused IPv6 connection \
+        return Err("use 127.0.0.1 instead of localhost: Windows tries ::1 first, and a refused IPv6 connection \
                     costs about 2 seconds"
-                .into(),
-        );
+            .into());
     }
     if parsed.query().is_some() || parsed.fragment().is_some() {
         return Err("it must not have a query or fragment".into());
@@ -286,10 +270,7 @@ mod tests {
             jail.create_file("jetway.toml", "[upstream]\nurl = \"http://localhost:11434\"\n")?;
             let problems = problems(load_in(jail));
             assert_eq!(problems.len(), 1);
-            assert!(
-                problems[0].contains("use 127.0.0.1 instead of localhost"),
-                "{problems:?}"
-            );
+            assert!(problems[0].contains("use 127.0.0.1 instead of localhost"), "{problems:?}");
             Ok(())
         });
     }

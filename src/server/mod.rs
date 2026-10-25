@@ -47,13 +47,7 @@ impl Gateway {
     pub fn new(config: Config, sink: Arc<dyn Sink>) -> Result<Arc<Self>, reqwest::Error> {
         let upstream = Upstream::new(&config.upstream)?;
         let keys = KeyMap::from_config(&config);
-        Ok(Arc::new(Self {
-            config,
-            upstream,
-            keys,
-            sink,
-            inflight: Arc::new(AtomicUsize::new(0)),
-        }))
+        Ok(Arc::new(Self { config, upstream, keys, sink, inflight: Arc::new(AtomicUsize::new(0)) }))
     }
 
     pub fn inflight(&self) -> usize {
@@ -90,10 +84,7 @@ pub async fn run(
         let gateway = Arc::clone(&gateway);
         async move {
             shutdown.await;
-            tracing::info!(
-                in_flight = gateway.inflight(),
-                "shutting down; letting in-flight requests finish"
-            );
+            tracing::info!(in_flight = gateway.inflight(), "shutting down; letting in-flight requests finish");
             stopping.notify_one();
         }
     };
@@ -128,20 +119,9 @@ fn reject(
     let body = errors::error_body(exchange.protocol, status, &message);
     let mut response = Response::new(Body::from(body.clone()));
     *response.status_mut() = status;
-    response.headers_mut().insert(
-        CONTENT_TYPE,
-        HeaderValue::from_static("application/json; charset=utf-8"),
-    );
+    response.headers_mut().insert(CONTENT_TYPE, HeaderValue::from_static("application/json; charset=utf-8"));
     set_id(&mut response, exchange.id);
-    finish_without_response(
-        gateway.sink.as_ref(),
-        exchange,
-        status.as_u16(),
-        outcome,
-        message,
-        timings,
-        body,
-    );
+    finish_without_response(gateway.sink.as_ref(), exchange, status.as_u16(), outcome, message, timings, body);
     response
 }
 
@@ -166,11 +146,7 @@ async fn handle(State(gateway): State<Arc<Gateway>>, request: Request) -> Respon
     let started = Instant::now();
     let inflight = InflightGuard::new(&gateway.inflight);
     let (parts, body) = request.into_parts();
-    let traceparent = parts
-        .headers
-        .get("traceparent")
-        .and_then(|v| v.to_str().ok())
-        .map(str::to_string);
+    let traceparent = parts.headers.get("traceparent").and_then(|v| v.to_str().ok()).map(str::to_string);
 
     let identity = identify(parts.uri.path(), &parts.headers, &gateway.keys);
     let (app, path) = match &identity {
@@ -198,51 +174,20 @@ async fn handle(State(gateway): State<Arc<Gateway>>, request: Request) -> Respon
     let mut timings = Timings::default();
 
     if let Err(error) = identity {
-        return reject(
-            &gateway,
-            exchange,
-            StatusCode::BAD_REQUEST,
-            Outcome::Rejected,
-            timings,
-            error.to_string(),
-        );
+        return reject(&gateway, exchange, StatusCode::BAD_REQUEST, Outcome::Rejected, timings, error.to_string());
     }
     if gateway.config.server.require_known_app && !gateway.is_known(&exchange.app) {
         let message = format!("unknown app {:?}; list it under [apps] in jetway.toml", exchange.app);
-        return reject(
-            &gateway,
-            exchange,
-            StatusCode::FORBIDDEN,
-            Outcome::Rejected,
-            timings,
-            message,
-        );
+        return reject(&gateway, exchange, StatusCode::FORBIDDEN, Outcome::Rejected, timings, message);
     }
     match class {
         PathClass::Unknown => {
             let message = format!("Jetway doesn't forward {path}");
-            return reject(
-                &gateway,
-                exchange,
-                StatusCode::NOT_FOUND,
-                Outcome::Rejected,
-                timings,
-                message,
-            );
+            return reject(&gateway, exchange, StatusCode::NOT_FOUND, Outcome::Rejected, timings, message);
         }
         PathClass::ModelManagement if !gateway.is_admin(&exchange.app) => {
-            let message = format!(
-                "app {:?} may not use {path}; set admin = true for it in jetway.toml",
-                exchange.app
-            );
-            return reject(
-                &gateway,
-                exchange,
-                StatusCode::FORBIDDEN,
-                Outcome::Rejected,
-                timings,
-                message,
-            );
+            let message = format!("app {:?} may not use {path}; set admin = true for it in jetway.toml", exchange.app);
+            return reject(&gateway, exchange, StatusCode::FORBIDDEN, Outcome::Rejected, timings, message);
         }
         _ => {}
     }
@@ -252,25 +197,11 @@ async fn handle(State(gateway): State<Arc<Gateway>>, request: Request) -> Respon
         Ok(bytes) => bytes,
         Err(error) if is_body_too_large(&error) => {
             let message = format!("the request body is larger than {limit} bytes");
-            return reject(
-                &gateway,
-                exchange,
-                StatusCode::PAYLOAD_TOO_LARGE,
-                Outcome::Rejected,
-                timings,
-                message,
-            );
+            return reject(&gateway, exchange, StatusCode::PAYLOAD_TOO_LARGE, Outcome::Rejected, timings, message);
         }
         Err(error) => {
             let message = format!("couldn't read the request body: {error}");
-            return reject(
-                &gateway,
-                exchange,
-                StatusCode::BAD_REQUEST,
-                Outcome::ClientCancelled,
-                timings,
-                message,
-            );
+            return reject(&gateway, exchange, StatusCode::BAD_REQUEST, Outcome::ClientCancelled, timings, message);
         }
     };
     exchange.request = request_body.clone();
@@ -291,28 +222,11 @@ async fn handle(State(gateway): State<Arc<Gateway>>, request: Request) -> Respon
             } else {
                 format!("the upstream request failed: {error}")
             };
-            return reject(
-                &gateway,
-                exchange,
-                StatusCode::BAD_GATEWAY,
-                Outcome::UpstreamError,
-                timings,
-                message,
-            );
+            return reject(&gateway, exchange, StatusCode::BAD_GATEWAY, Outcome::UpstreamError, timings, message);
         }
         Err(_) => {
-            let message = format!(
-                "no response from the upstream within {} s",
-                upstream.first_byte_timeout.as_secs()
-            );
-            return reject(
-                &gateway,
-                exchange,
-                StatusCode::GATEWAY_TIMEOUT,
-                Outcome::Timeout,
-                timings,
-                message,
-            );
+            let message = format!("no response from the upstream within {} s", upstream.first_byte_timeout.as_secs());
+            return reject(&gateway, exchange, StatusCode::GATEWAY_TIMEOUT, Outcome::Timeout, timings, message);
         }
     };
     timings.headers = Some(started.elapsed());
@@ -324,9 +238,7 @@ async fn handle(State(gateway): State<Arc<Gateway>>, request: Request) -> Respon
         // A stream may get an error line appended, so its length isn't known in advance.
         client_headers.remove(CONTENT_LENGTH);
     }
-    let expected_len = client_headers
-        .get(CONTENT_LENGTH)
-        .and_then(|v| v.to_str().ok()?.parse().ok());
+    let expected_len = client_headers.get(CONTENT_LENGTH).and_then(|v| v.to_str().ok()?.parse().ok());
     let id = exchange.id;
     let tee = TeeBody::new(TeeParts {
         upstream: response.bytes_stream().boxed(),

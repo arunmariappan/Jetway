@@ -10,11 +10,7 @@ pub enum Protocol {
 
 impl Protocol {
     pub fn for_path(path: &str) -> Self {
-        if path == "/v1" || path.starts_with("/v1/") {
-            Self::OpenAi
-        } else {
-            Self::Ollama
-        }
+        if path == "/v1" || path.starts_with("/v1/") { Self::OpenAi } else { Self::Ollama }
     }
 
     pub fn as_str(self) -> &'static str {
@@ -71,18 +67,9 @@ mod tests {
 
     #[test]
     fn framing_by_content_type() {
-        assert_eq!(
-            Framing::from_content_type(Some("application/x-ndjson")),
-            Framing::Ndjson
-        );
-        assert_eq!(
-            Framing::from_content_type(Some("text/event-stream; charset=utf-8")),
-            Framing::Sse
-        );
-        assert_eq!(
-            Framing::from_content_type(Some("application/json; charset=utf-8")),
-            Framing::Whole
-        );
+        assert_eq!(Framing::from_content_type(Some("application/x-ndjson")), Framing::Ndjson);
+        assert_eq!(Framing::from_content_type(Some("text/event-stream; charset=utf-8")), Framing::Sse);
+        assert_eq!(Framing::from_content_type(Some("application/json; charset=utf-8")), Framing::Whole);
         assert_eq!(Framing::from_content_type(None), Framing::Whole);
     }
 }

@@ -26,8 +26,7 @@ pub fn classify(path: &str) -> PathClass {
 }
 
 fn is_single_segment_under(path: &str, prefix: &str) -> bool {
-    path.strip_prefix(prefix)
-        .is_some_and(|rest| !rest.is_empty() && !rest.contains('/'))
+    path.strip_prefix(prefix).is_some_and(|rest| !rest.is_empty() && !rest.contains('/'))
 }
 
 #[cfg(test)]
@@ -42,36 +41,13 @@ mod tests {
         for path in ["/api/embed", "/api/embeddings", "/v1/embeddings"] {
             assert_eq!(classify(path), PathClass::Embedding, "{path}");
         }
-        for path in [
-            "/",
-            "/api/tags",
-            "/api/ps",
-            "/api/version",
-            "/api/show",
-            "/v1/models",
-            "/v1/models/qwen3.5:4b",
-        ] {
+        for path in ["/", "/api/tags", "/api/ps", "/api/version", "/api/show", "/v1/models", "/v1/models/qwen3.5:4b"] {
             assert_eq!(classify(path), PathClass::Info, "{path}");
         }
-        for path in [
-            "/api/pull",
-            "/api/delete",
-            "/api/create",
-            "/api/copy",
-            "/api/push",
-            "/api/blobs/sha256:abc",
-        ] {
+        for path in ["/api/pull", "/api/delete", "/api/create", "/api/copy", "/api/push", "/api/blobs/sha256:abc"] {
             assert_eq!(classify(path), PathClass::ModelManagement, "{path}");
         }
-        for path in [
-            "/api/chat/",
-            "/api",
-            "/admin",
-            "/api/blobs/",
-            "/api/blobs/a/b",
-            "/v1/models/a/b",
-            "/metrics",
-        ] {
+        for path in ["/api/chat/", "/api", "/admin", "/api/blobs/", "/api/blobs/a/b", "/v1/models/a/b", "/metrics"] {
             assert_eq!(classify(path), PathClass::Unknown, "{path}");
         }
     }

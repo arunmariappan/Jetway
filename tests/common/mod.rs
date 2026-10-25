@@ -68,15 +68,7 @@ impl Harness {
         let server = tokio::spawn(server::run(listener, Arc::clone(&gateway), async move {
             let _ = stopped.await;
         }));
-        Self {
-            fake,
-            gateway,
-            url,
-            records,
-            client: client(),
-            stop: Some(stop),
-            server: Some(server),
-        }
+        Self { fake, gateway, url, records, client: client(), stop: Some(stop), server: Some(server) }
     }
 
     /// Asks the gateway to shut down (it then lets in-flight requests finish).

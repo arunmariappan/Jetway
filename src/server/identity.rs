@@ -40,10 +40,7 @@ pub struct KeyMap(HashMap<String, String>);
 
 impl KeyMap {
     pub fn from_config(config: &Config) -> Self {
-        let keys = config
-            .apps
-            .iter()
-            .flat_map(|(app, c)| c.keys.iter().map(move |k| (k.clone(), app.clone())));
+        let keys = config.apps.iter().flat_map(|(app, c)| c.keys.iter().map(move |k| (k.clone(), app.clone())));
         Self(keys.collect())
     }
 
@@ -65,11 +62,7 @@ pub fn identify(path: &str, headers: &HeaderMap, keys: &KeyMap) -> Result<Identi
         }
         // `/a/{app}` and `/a/{app}/` both mean `/`: OllamaSharp checks "is Ollama running" with a GET of its base
         // address (spike S4).
-        return Ok(Identity {
-            app: app.to_string(),
-            source: Source::Prefix,
-            path: format!("/{tail}"),
-        });
+        return Ok(Identity { app: app.to_string(), source: Source::Prefix, path: format!("/{tail}") });
     }
 
     let path = path.to_string();
@@ -78,24 +71,12 @@ pub fn identify(path: &str, headers: &HeaderMap, keys: &KeyMap) -> Result<Identi
         if !is_valid_name(app) {
             return Err(IdentityError::InvalidName(app.to_string()));
         }
-        return Ok(Identity {
-            app: app.to_string(),
-            source: Source::Header,
-            path,
-        });
+        return Ok(Identity { app: app.to_string(), source: Source::Header, path });
     }
     if let Some(app) = keys.app_for(headers) {
-        return Ok(Identity {
-            app: app.to_string(),
-            source: Source::Key,
-            path,
-        });
+        return Ok(Identity { app: app.to_string(), source: Source::Key, path });
     }
-    Ok(Identity {
-        app: DEFAULT_APP.to_string(),
-        source: Source::Default,
-        path,
-    })
+    Ok(Identity { app: DEFAULT_APP.to_string(), source: Source::Default, path })
 }
 
 #[cfg(test)]
@@ -107,13 +88,7 @@ mod tests {
 
     fn keys() -> KeyMap {
         let mut config = Config::default();
-        config.apps.insert(
-            "chatui".into(),
-            AppConfig {
-                keys: vec!["jw-chat".into()],
-                ..AppConfig::default()
-            },
-        );
+        config.apps.insert("chatui".into(), AppConfig { keys: vec!["jw-chat".into()], ..AppConfig::default() });
         KeyMap::from_config(&config)
     }
 
@@ -129,10 +104,7 @@ mod tests {
     fn prefix_wins_and_is_stripped() {
         let h = headers(&[(APP_HEADER, "other"), ("authorization", "Bearer jw-chat")]);
         let id = identify("/a/paperpilot/api/chat", &h, &keys()).unwrap();
-        assert_eq!(
-            (id.app.as_str(), id.source, id.path.as_str()),
-            ("paperpilot", Source::Prefix, "/api/chat")
-        );
+        assert_eq!((id.app.as_str(), id.source, id.path.as_str()), ("paperpilot", Source::Prefix, "/api/chat"));
     }
 
     #[test]

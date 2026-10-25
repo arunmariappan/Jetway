@@ -137,11 +137,7 @@ impl Recorder {
         let (chunks, rx) = mpsc::channel(CHANNEL_CHUNKS);
         let (end, end_rx) = oneshot::channel();
         tokio::spawn(collect(exchange, rx, end_rx, sink));
-        Self {
-            chunks,
-            end: Some(end),
-            skipped: false,
-        }
+        Self { chunks, end: Some(end), skipped: false }
     }
 
     /// Hands a chunk to the recorder without waiting. A clone of `Bytes` is a reference count, not a copy.

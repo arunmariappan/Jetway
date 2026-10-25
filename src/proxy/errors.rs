@@ -40,10 +40,7 @@ pub fn error_body(protocol: Protocol, status: StatusCode, message: &str) -> Byte
 pub fn error_response(protocol: Protocol, status: StatusCode, message: &str) -> Response {
     let mut response = Response::new(Body::from(error_body(protocol, status, message)));
     *response.status_mut() = status;
-    response.headers_mut().insert(
-        CONTENT_TYPE,
-        HeaderValue::from_static("application/json; charset=utf-8"),
-    );
+    response.headers_mut().insert(CONTENT_TYPE, HeaderValue::from_static("application/json; charset=utf-8"));
     response
 }
 
@@ -55,11 +52,7 @@ pub fn stream_error(framing: Framing, protocol: Protocol, tail: &[u8], message: 
     let (separator, line) = match framing {
         Framing::Whole => return None,
         Framing::Ndjson => {
-            let separator: &[u8] = if tail.is_empty() || tail.ends_with(b"\n") {
-                b""
-            } else {
-                b"\n"
-            };
+            let separator: &[u8] = if tail.is_empty() || tail.ends_with(b"\n") { b"" } else { b"\n" };
             (separator, format!("{value}\n"))
         }
         Framing::Sse => {

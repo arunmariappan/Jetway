@@ -68,20 +68,13 @@ fn run(cli: Cli) -> anyhow::Result<()> {
 }
 
 fn runtime() -> anyhow::Result<tokio::runtime::Runtime> {
-    tokio::runtime::Builder::new_multi_thread()
-        .enable_all()
-        .build()
-        .context("couldn't start the async runtime")
+    tokio::runtime::Builder::new_multi_thread().enable_all().build().context("couldn't start the async runtime")
 }
 
 fn init_logging() {
     let filter = EnvFilter::try_from_env("JETWAY_LOG").unwrap_or_else(|_| EnvFilter::new("info"));
     let ansi = std::io::IsTerminal::is_terminal(&std::io::stdout());
-    tracing_subscriber::fmt()
-        .with_env_filter(filter)
-        .with_ansi(ansi)
-        .compact()
-        .init();
+    tracing_subscriber::fmt().with_env_filter(filter).with_ansi(ansi).compact().init();
 }
 
 async fn serve(config: Config) -> anyhow::Result<()> {

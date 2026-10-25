@@ -53,15 +53,9 @@ mod tests {
 
     #[test]
     fn urls_join_without_double_slashes() {
-        let config = UpstreamConfig {
-            url: "http://127.0.0.1:8210/a/opsdesk/".into(),
-            ..UpstreamConfig::default()
-        };
+        let config = UpstreamConfig { url: "http://127.0.0.1:8210/a/opsdesk/".into(), ..UpstreamConfig::default() };
         let upstream = Upstream::new(&config).unwrap();
-        assert_eq!(
-            upstream.url_for("/api/chat?x=1"),
-            "http://127.0.0.1:8210/a/opsdesk/api/chat?x=1"
-        );
+        assert_eq!(upstream.url_for("/api/chat?x=1"), "http://127.0.0.1:8210/a/opsdesk/api/chat?x=1");
         let upstream = Upstream::new(&UpstreamConfig::default()).unwrap();
         assert_eq!(upstream.url_for("/"), "http://127.0.0.1:11434/");
     }

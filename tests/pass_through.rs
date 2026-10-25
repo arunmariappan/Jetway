@@ -1,4 +1,5 @@
 //! Phase 1: the streaming pass-through against the fake Ollama.
+#![allow(clippy::unwrap_used, clippy::expect_used)]
 
 mod common;
 
@@ -24,12 +25,7 @@ async fn read_timed(mut response: reqwest::Response) -> (Vec<u8>, Vec<(Instant, 
 async fn streamed_chunks_arrive_when_sent() {
     let h = Harness::start().await;
     let (name, value) = script(r#"{"gap_ms":100,"chunks":4}"#);
-    let response = h
-        .post("/api/chat", chat(true))
-        .header(name, value)
-        .send()
-        .await
-        .unwrap();
+    let response = h.post("/api/chat", chat(true)).header(name, value).send().await.unwrap();
     assert_eq!(response.headers()["content-type"], "application/x-ndjson");
     let (_, marks) = read_timed(response).await;
 
@@ -41,10 +37,7 @@ async fn streamed_chunks_arrive_when_sent() {
         end += bytes.len();
         let (received_at, _) = marks.iter().find(|(_, len)| *len >= end).copied().unwrap();
         let delay = received_at.duration_since(sent_at);
-        assert!(
-            delay < Duration::from_millis(5),
-            "chunk ending at byte {end} arrived {delay:?} after it was sent"
-        );
+        assert!(delay < Duration::from_millis(5), "chunk ending at byte {end} arrived {delay:?} after it was sent");
     }
 }
 
@@ -54,24 +47,12 @@ async fn bodies_are_forwarded_byte_for_byte() {
     let cases = [
         ("/api/chat", chat(true)),
         ("/api/chat", chat(false)),
-        (
-            "/api/chat",
-            json!({"model": "qwen3.5:4b", "messages": [], "think": true}),
-        ),
+        ("/api/chat", json!({"model": "qwen3.5:4b", "messages": [], "think": true})),
         ("/api/generate", json!({"model": "qwen3.5:4b", "prompt": "hi"})),
-        (
-            "/api/generate",
-            json!({"model": "qwen3.5:4b", "prompt": "hi", "stream": false}),
-        ),
-        (
-            "/v1/chat/completions",
-            json!({"model": "qwen3.5:4b", "messages": [], "stream": true}),
-        ),
+        ("/api/generate", json!({"model": "qwen3.5:4b", "prompt": "hi", "stream": false})),
+        ("/v1/chat/completions", json!({"model": "qwen3.5:4b", "messages": [], "stream": true})),
         ("/v1/chat/completions", json!({"model": "qwen3.5:4b", "messages": []})),
-        (
-            "/v1/completions",
-            json!({"model": "qwen3.5:4b", "prompt": "hi", "stream": true}),
-        ),
+        ("/v1/completions", json!({"model": "qwen3.5:4b", "prompt": "hi", "stream": true})),
         ("/api/embed", json!({"model": "qwen3.5:4b", "input": ["a", "b"]})),
         ("/v1/embeddings", json!({"model": "qwen3.5:4b", "input": "a"})),
         ("/api/show", json!({"model": "qwen3.5:4b"})),
@@ -86,34 +67,15 @@ async fn bodies_are_forwarded_byte_for_byte() {
         assert_eq!(through.bytes().await.unwrap(), direct, "{path} {body}");
     }
     for path in ["/api/tags", "/api/ps", "/api/version", "/v1/models", "/"] {
-        let direct = h
-            .client
-            .get(format!("{}{path}", h.fake.url()))
-            .send()
-            .await
-            .unwrap()
-            .bytes()
-            .await
-            .unwrap();
-        let through = h
-            .client
-            .get(format!("{}{path}", h.url))
-            .send()
-            .await
-            .unwrap()
-            .bytes()
-            .await
-            .unwrap();
+        let direct = h.client.get(format!("{}{path}", h.fake.url())).send().await.unwrap().bytes().await.unwrap();
+        let through = h.client.get(format!("{}{path}", h.url)).send().await.unwrap().bytes().await.unwrap();
         assert_eq!(through, direct, "{path}");
     }
     let records = h.records.wait_for(16).await;
     assert!(
         records.iter().all(|r| r.outcome == Outcome::Ok),
         "{:#?}",
-        records
-            .iter()
-            .map(|r| (&r.exchange.path, r.outcome))
-            .collect::<Vec<_>>()
+        records.iter().map(|r| (&r.exchange.path, r.outcome)).collect::<Vec<_>>()
     );
 }
 
@@ -121,58 +83,27 @@ async fn bodies_are_forwarded_byte_for_byte() {
 async fn lines_split_across_chunks_pass_unchanged() {
     let h = Harness::start().await;
     let (name, value) = script(r#"{"split_lines":true,"gap_ms":5}"#);
-    let direct = h
-        .direct("/api/chat", chat(true))
-        .send()
-        .await
-        .unwrap()
-        .bytes()
-        .await
-        .unwrap();
-    let through = h
-        .post("/api/chat", chat(true))
-        .header(name, value)
-        .send()
-        .await
-        .unwrap()
-        .bytes()
-        .await
-        .unwrap();
+    let direct = h.direct("/api/chat", chat(true)).send().await.unwrap().bytes().await.unwrap();
+    let through = h.post("/api/chat", chat(true)).header(name, value).send().await.unwrap().bytes().await.unwrap();
     assert_eq!(through, direct);
     let id = h.fake.events.requests()[1].0;
-    assert!(
-        h.fake.events.chunks_sent(id).len() > 10,
-        "the fake should have split the lines"
-    );
+    assert!(h.fake.events.chunks_sent(id).len() > 10, "the fake should have split the lines");
 }
 
 #[tokio::test]
 async fn a_client_disconnect_closes_the_upstream_connection() {
     let h = Harness::start().await;
     let (name, value) = script(r#"{"gap_ms":20,"chunks":1000}"#);
-    let mut response = h
-        .post("/api/chat", chat(true))
-        .header(name, value)
-        .send()
-        .await
-        .unwrap();
+    let mut response = h.post("/api/chat", chat(true)).header(name, value).send().await.unwrap();
     response.chunk().await.unwrap();
     response.chunk().await.unwrap();
     let left = Instant::now();
     drop(response);
 
     let id = h.fake.events.requests()[0].0;
-    let closed = h
-        .fake
-        .events
-        .wait_disconnected(id, Duration::from_secs(2))
-        .await
-        .expect("upstream never closed");
+    let closed = h.fake.events.wait_disconnected(id, Duration::from_secs(2)).await.expect("upstream never closed");
     let after = closed.duration_since(left);
-    assert!(
-        after < Duration::from_millis(100),
-        "the upstream connection closed {after:?} after the client left"
-    );
+    assert!(after < Duration::from_millis(100), "the upstream connection closed {after:?} after the client left");
     let record = &h.records.wait_for(1).await[0];
     assert_eq!(record.outcome, Outcome::ClientCancelled);
     assert_eq!(h.gateway.inflight(), 0);
@@ -182,57 +113,33 @@ async fn a_client_disconnect_closes_the_upstream_connection() {
 async fn a_client_that_leaves_before_the_first_byte_cancels_the_upstream_call() {
     let h = Harness::start().await;
     let (name, value) = script(r#"{"ttfb_ms":3000}"#);
-    let request = h
-        .post("/api/chat", chat(true))
-        .header(name, value)
-        .timeout(Duration::from_millis(200));
+    let request = h.post("/api/chat", chat(true)).header(name, value).timeout(Duration::from_millis(200));
     assert!(request.send().await.is_err());
     let left = Instant::now();
 
     let id = h.fake.events.requests()[0].0;
-    let closed = h
-        .fake
-        .events
-        .wait_disconnected(id, Duration::from_secs(4))
-        .await
-        .expect("upstream never closed");
+    let closed = h.fake.events.wait_disconnected(id, Duration::from_secs(4)).await.expect("upstream never closed");
     let after = closed.duration_since(left);
-    assert!(
-        after < Duration::from_millis(500),
-        "the upstream call was cancelled {after:?} after the client left"
-    );
+    assert!(after < Duration::from_millis(500), "the upstream call was cancelled {after:?} after the client left");
 }
 
 #[tokio::test]
 async fn path_rules_and_app_identity() {
     let h = Harness::start_with(|c| {
-        c.apps.insert(
-            "ops".into(),
-            jetway::config::AppConfig {
-                admin: true,
-                ..Default::default()
-            },
-        );
+        c.apps.insert("ops".into(), jetway::config::AppConfig { admin: true, ..Default::default() });
     })
     .await;
 
     let unknown = h.post("/api/nope", json!({})).send().await.unwrap();
     assert_eq!(unknown.status(), 404);
-    assert_eq!(
-        unknown.text().await.unwrap(),
-        r#"{"error":"Jetway doesn't forward /api/nope"}"#
-    );
+    assert_eq!(unknown.text().await.unwrap(), r#"{"error":"Jetway doesn't forward /api/nope"}"#);
 
     let openai_unknown = h.post("/v1/assistants", json!({})).send().await.unwrap();
     assert_eq!(openai_unknown.status(), 404);
     let body: serde_json::Value = openai_unknown.json().await.unwrap();
     assert_eq!(body["error"]["type"], "not_found_error");
 
-    let pull = h
-        .post("/a/paperpilot/api/pull", json!({"model": "x"}))
-        .send()
-        .await
-        .unwrap();
+    let pull = h.post("/a/paperpilot/api/pull", json!({"model": "x"})).send().await.unwrap();
     assert_eq!(pull.status(), 403);
     // An admin app reaches the upstream (the fake has no /api/pull, so its 404 comes back unchanged).
     let pull = h.post("/a/ops/api/pull", json!({"model": "x"})).send().await.unwrap();
@@ -242,20 +149,11 @@ async fn path_rules_and_app_identity() {
     let bad = h.post("/a/Bad_Name/api/chat", chat(false)).send().await.unwrap();
     assert_eq!(bad.status(), 400);
 
-    h.post("/a/paperpilot/api/chat", chat(false))
-        .send()
-        .await
-        .unwrap()
-        .bytes()
-        .await
-        .unwrap();
+    h.post("/a/paperpilot/api/chat", chat(false)).send().await.unwrap().bytes().await.unwrap();
     let requests = h.fake.events.requests();
     assert_eq!(requests.last().unwrap().2, "/api/chat", "the prefix is stripped");
     let records = h.records.wait_for(6).await;
-    let last = records
-        .iter()
-        .find(|r| r.exchange.app == "paperpilot" && r.status == 200)
-        .unwrap();
+    let last = records.iter().find(|r| r.exchange.app == "paperpilot" && r.status == 200).unwrap();
     assert_eq!(last.exchange.path, "/api/chat");
 }
 
@@ -298,23 +196,12 @@ async fn upstream_down_fails_fast_in_each_protocol() {
     let response = h.post("/api/chat", chat(true)).send().await.unwrap();
     let elapsed = started.elapsed();
     assert_eq!(response.status(), 502);
-    assert_eq!(
-        response.text().await.unwrap(),
-        r#"{"error":"Ollama isn't reachable at http://127.0.0.1:9"}"#
-    );
+    assert_eq!(response.text().await.unwrap(), r#"{"error":"Ollama isn't reachable at http://127.0.0.1:9"}"#);
     // A refused connection to 127.0.0.1 is immediate on Linux; Windows reports it only after about 2 s of retries.
-    let limit = if cfg!(windows) {
-        Duration::from_millis(2500)
-    } else {
-        Duration::from_millis(50)
-    };
+    let limit = if cfg!(windows) { Duration::from_millis(2500) } else { Duration::from_millis(50) };
     assert!(elapsed < limit, "took {elapsed:?}");
 
-    let response = h
-        .post("/v1/chat/completions", json!({"messages": []}))
-        .send()
-        .await
-        .unwrap();
+    let response = h.post("/v1/chat/completions", json!({"messages": []})).send().await.unwrap();
     assert_eq!(response.status(), 502);
     let body: serde_json::Value = response.json().await.unwrap();
     assert_eq!(body["error"]["type"], "upstream_unavailable");
@@ -326,17 +213,9 @@ async fn upstream_down_fails_fast_in_each_protocol() {
 async fn first_byte_timeout() {
     let h = Harness::start_with(|c| c.upstream.first_byte_timeout_seconds = 1).await;
     let (name, value) = script(r#"{"ttfb_ms":3000}"#);
-    let response = h
-        .post("/api/chat", chat(true))
-        .header(name, value)
-        .send()
-        .await
-        .unwrap();
+    let response = h.post("/api/chat", chat(true)).header(name, value).send().await.unwrap();
     assert_eq!(response.status(), 504);
-    assert_eq!(
-        response.text().await.unwrap(),
-        r#"{"error":"no response from the upstream within 1 s"}"#
-    );
+    assert_eq!(response.text().await.unwrap(), r#"{"error":"no response from the upstream within 1 s"}"#);
     assert_eq!(h.records.wait_for(1).await[0].outcome, Outcome::Timeout);
 }
 
@@ -344,12 +223,7 @@ async fn first_byte_timeout() {
 async fn idle_timeout_ends_the_stream_with_an_error_line() {
     let h = Harness::start_with(|c| c.upstream.idle_timeout_seconds = 1).await;
     let (name, value) = script(r#"{"hang_after":2}"#);
-    let response = h
-        .post("/api/chat", chat(true))
-        .header(name, value)
-        .send()
-        .await
-        .unwrap();
+    let response = h.post("/api/chat", chat(true)).header(name, value).send().await.unwrap();
     let body = response.text().await.unwrap();
     let last = body.lines().last().unwrap();
     assert_eq!(last, r#"{"error":"no data from the upstream for 1 s"}"#);
@@ -363,12 +237,7 @@ async fn idle_timeout_ends_the_stream_with_an_error_line() {
 async fn a_failure_mid_stream_ends_with_an_error_line() {
     let h = Harness::start().await;
     let (name, value) = script(r#"{"drop_after":3,"split_lines":true}"#);
-    let response = h
-        .post("/api/chat", chat(true))
-        .header(name, value)
-        .send()
-        .await
-        .unwrap();
+    let response = h.post("/api/chat", chat(true)).header(name, value).send().await.unwrap();
     let body = response.text().await.unwrap();
     // Three half-lines arrived: the error goes on a new line after the partial one.
     let last = body.lines().last().unwrap();
@@ -391,12 +260,7 @@ async fn a_failure_mid_stream_ends_with_an_error_line() {
 async fn upstream_errors_pass_through_unchanged() {
     let h = Harness::start().await;
     let (name, value) = script(r#"{"status":500}"#);
-    let response = h
-        .post("/api/chat", chat(false))
-        .header(name, value)
-        .send()
-        .await
-        .unwrap();
+    let response = h.post("/api/chat", chat(false)).header(name, value).send().await.unwrap();
     assert_eq!(response.status(), 500);
     assert_eq!(response.text().await.unwrap(), r#"{"error":"scripted failure"}"#);
     let record = &h.records.wait_for(1).await[0];
@@ -416,12 +280,7 @@ async fn request_bodies_over_the_limit_are_refused() {
 async fn shutdown_lets_an_in_flight_stream_finish() {
     let mut h = Harness::start().await;
     let (name, value) = script(r#"{"gap_ms":50,"chunks":10}"#);
-    let mut response = h
-        .post("/api/chat", chat(true))
-        .header(name, value)
-        .send()
-        .await
-        .unwrap();
+    let mut response = h.post("/api/chat", chat(true)).header(name, value).send().await.unwrap();
     response.chunk().await.unwrap();
     h.shutdown();
     let mut lines = 1;
@@ -430,10 +289,6 @@ async fn shutdown_lets_an_in_flight_stream_finish() {
     }
     assert_eq!(lines, 11, "the stream ran to its end");
     let server = h.server.take().unwrap();
-    tokio::time::timeout(Duration::from_secs(3), server)
-        .await
-        .unwrap()
-        .unwrap()
-        .unwrap();
+    tokio::time::timeout(Duration::from_secs(3), server).await.unwrap().unwrap().unwrap();
     assert_eq!(h.records.wait_for(1).await[0].outcome, Outcome::Ok);
 }
