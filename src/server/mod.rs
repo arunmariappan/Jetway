@@ -14,7 +14,7 @@ use axum::Router;
 use axum::body::Body;
 use axum::extract::{Request, State};
 use axum::http::header::{CONTENT_LENGTH, CONTENT_TYPE};
-use axum::http::{HeaderValue, StatusCode};
+use axum::http::{HeaderValue, Method, StatusCode};
 use axum::response::Response;
 use axum::serve::ListenerExt;
 use bytes::Bytes;
@@ -238,7 +238,11 @@ async fn handle(State(gateway): State<Arc<Gateway>>, request: Request) -> Respon
         // A stream may get an error line appended, so its length isn't known in advance.
         client_headers.remove(CONTENT_LENGTH);
     }
-    let expected_len = client_headers.get(CONTENT_LENGTH).and_then(|v| v.to_str().ok()?.parse().ok());
+    // A HEAD response, 204 or 304 has no body, whatever its Content-Length says, and the server never reads one.
+    let bodyless =
+        parts.method == Method::HEAD || status == StatusCode::NO_CONTENT || status == StatusCode::NOT_MODIFIED;
+    let expected_len =
+        if bodyless { Some(0) } else { client_headers.get(CONTENT_LENGTH).and_then(|v| v.to_str().ok()?.parse().ok()) };
     let id = exchange.id;
     let tee = TeeBody::new(TeeParts {
         upstream: response.bytes_stream().boxed(),

@@ -67,7 +67,7 @@ pub struct TeeParts {
 
 impl TeeBody {
     pub fn new(parts: TeeParts) -> Self {
-        Self {
+        let mut tee = Self {
             upstream: parts.upstream,
             idle: Box::pin(tokio::time::sleep(parts.idle_timeout)),
             idle_timeout: parts.idle_timeout,
@@ -82,7 +82,11 @@ impl TeeBody {
             expected_len: parts.expected_len,
             recorder: Some(parts.recorder),
             _inflight: parts.inflight,
+        };
+        if tee.expected_len == Some(0) {
+            tee.finish(Outcome::Ok, None);
         }
+        tee
     }
 
     fn remember_tail(&mut self, chunk: &[u8]) {

@@ -71,7 +71,9 @@ async fn bodies_are_forwarded_byte_for_byte() {
         let through = h.client.get(format!("{}{path}", h.url)).send().await.unwrap().bytes().await.unwrap();
         assert_eq!(through, direct, "{path}");
     }
-    let records = h.records.wait_for(16).await;
+    let head = h.client.head(format!("{}/", h.url)).send().await.unwrap();
+    assert_eq!(head.status(), 200);
+    let records = h.records.wait_for(17).await;
     assert!(
         records.iter().all(|r| r.outcome == Outcome::Ok),
         "{:#?}",
