@@ -4,74 +4,119 @@
 protocol and stream mode, without touching the GPU; and identical requests that arrive while the first is still
 running share its one upstream call.
 
-**Size:** M · **Depends on:** 2
+**Size:** M · **Depends on:** 2 · **Status:** done (2026-10-25)
 
 ## Tasks
 
 ### 3.1 Cache key
-- [ ] blake3 over a canonical form of the fields that change the answer: protocol, endpoint, effective model (after
-      aliases, phase 8), messages or prompt and system, image hashes, tools, `format` or `response_format`, all
-      options, `think`, Ollama's `template`, `raw` and `suffix`; OpenAI's `temperature`, `top_p`, `seed`,
-      `max_tokens`, `n`, `stop` and the like.
-- [ ] Left out because they don't change the answer: `stream`, `keep_alive`, `stream_options`, OpenAI's `user` and
-      `metadata`.
-- [ ] Canonical form: parsed into `serde_json::Value` (whose maps are sorted), numbers normalised (`1` and `1.0` are
-      equal), strings kept byte for byte. Defaults are not filled in: an omitted `temperature` and an explicit one
-      give different keys, which is safe.
-- [ ] Partitioned by app unless `cache.shared = true`.
+- [x] blake3 over a canonical form of the request body (`cache::key`): every field except the ones below, with
+      object keys sorted at every level and numbers normalised (`1` and `1.0` are equal), strings byte for byte. A
+      version string is hashed in first, so a change to the canonical form can't match old entries.
+- [x] Left out because they don't change the answer: `stream`, `keep_alive`, `stream_options`, `user`, `metadata`
+      (top level).
+- [x] Defaults are not filled in: an omitted `temperature` and an explicit one give different keys.
+- [x] Scoped by app and path unless `cache.shared = true`.
 
 ### 3.2 What is cacheable
-- [ ] Endpoints: `/api/chat`, `/api/generate`, `/v1/chat/completions`, `/v1/completions`, and the embedding
-      endpoints (deterministic, so ideal for caching).
-- [ ] Only complete, successful answers: status 200, a final chunk with `done: true` (or OpenAI's `finish_reason`),
-      a complete recording (not truncated or cancelled).
-- [ ] Sampled requests (temperature above 0 and no seed) follow the app's `sampled` policy (R3). Default `allow`.
-- [ ] Request controls: `Cache-Control: no-cache` skips the lookup but stores the answer; `no-store` does neither;
-      `X-Jetway-Cache: off` does neither.
-- [ ] Response headers: `X-Jetway-Cache: hit`, `miss`, `bypass` or `joined`; `X-Jetway-Cache-Age` on hits.
+- [x] Generation and embedding endpoints; model info and management are never looked at.
+- [x] Only complete answers: `ok`, status 200, the summary's `done`, no error object, not truncated or incomplete,
+      and a response framing that matches what the request asked for.
+- [x] Sampled requests (no seed, and a temperature that isn't 0, including the model's default) follow the app's
+      `sampled` policy; default `allow`.
+- [x] Request controls: `Cache-Control: no-cache` (fresh answer, stored), `no-store` and `X-Jetway-Cache: off`
+      (neither).
+- [x] `X-Jetway-Cache: hit | miss | bypass | joined | off` on every generation and embedding response;
+      `X-Jetway-Cache-Age` and `X-Jetway-Source` (the exchange that produced the answer) on hits.
 
 ### 3.3 Stored form and serving
-- [ ] Each entry stores a protocol-neutral answer (content, thinking, tool calls, done reason, token counts,
-      durations) plus the raw response bytes as they were sent.
-- [ ] Serving a hit in the stored stream mode replays the raw bytes; in the other mode, Jetway writes the answer
-      from the neutral form in the client's protocol: one JSON body, or a stream. Timestamps (`created_at`,
-      `created`) are set to now; OpenAI's `id` is new.
-- [ ] Streamed hits are `instant` by default (one chunk per original line, sent at once); `replay = "paced"` sends
-      them at the original token rate for UIs that look odd when a whole answer appears at once.
-- [ ] Token counts and durations in the served body stay as recorded, so clients that compute tokens per second keep
-      working; the headers say it was a hit, and Jetway's record counts the saved tokens and GPU time.
+- [x] An entry keeps the bytes the first client received and a protocol-neutral answer (content, thinking, tool
+      calls, done reason, token counts, Ollama's durations). Streamed OpenAI tool calls are assembled from their
+      pieces for this (`ResponseSummary::tool_call_values`).
+- [x] **Changed from the plan:** a hit in the same stream mode replays the stored bytes exactly, original
+      timestamps included, instead of rewriting each line's `created_at`; that keeps hits byte-identical to the
+      first answer and costs nothing. A hit in the other mode is written from the answer in the request's protocol,
+      with fresh timestamps and ids (`cache::answer::serve`, tested against every golden file in both directions).
+- [x] OpenAI streams are stored without a usage event; a client that asks for usage gets one written from the
+      recorded counts (D21). `usage` is left out of written bodies when the counts are unknown.
+- [x] `replay = "instant"` sends a hit at once, with a `Content-Length`; `"paced"` sends its lines spread over the
+      original generation time (`eval_duration`).
+- [x] Token counts and durations in served bodies stay as recorded; the exchange's cache note carries the saved
+      tokens and GPU time.
 
 ### 3.4 Storage
-- [ ] In memory: `moka`'s async cache, weighted by entry bytes, bounded by `max_memory_bytes`, with the TTL.
-- [ ] On disk: `cache_entries` in SQLite (zstd), written through the store writer. A memory miss falls back to a
-      SQLite lookup by key (an indexed read, well under a millisecond), so a restart keeps every entry without
-      loading them all.
-- [ ] Expiry and eviction in both; an hourly sweep deletes expired rows.
-- [ ] `jetway cache stats [--app A]`, `jetway cache list`, `jetway cache clear [--app A]`.
+- [x] In memory: `moka`'s sync cache (a lookup never waits), weighted by entry bytes, bounded by
+      `max_memory_bytes`, with the TTL.
+- [x] On disk: `cache_entries` (migration 2; zstd raw bytes, the answer as JSON), written by the store's writer; a
+      memory miss falls back to an indexed read, so a restart keeps every entry. Expired entries are never served
+      and are deleted by the hourly prune.
+- [x] `jetway cache stats`, `jetway cache list [--app A]`, `jetway cache clear [--app A]` (a running Jetway keeps
+      what it holds in memory until it expires; the admin API in phase 4 clears both).
 
 ### 3.5 Joined requests (D14)
-- [ ] An in-flight map from cache key to a shared stream: the chunks so far plus a notifier. A second identical
-      request joins: it gets the chunks so far, then the live tail. If its stream mode differs from the first
-      request's, it waits for the end and gets the answer written in its own mode.
-- [ ] The upstream call goes on while at least one client still reads it. If the first client disconnects and others
-      remain, nothing is cancelled; when the last one leaves, the upstream call is dropped.
-- [ ] Joined exchanges are recorded as `joined`, with the id of the exchange that made the upstream call.
-- [ ] Follows the same cacheability and `sampled` rules as the cache; an app can turn it off.
+- [x] Flights by join key (the exact key plus the stream mode and `include_usage`, which shape the bytes): the
+      first request leads; later identical requests read the same flight from its first chunk.
+- [x] A task (`cache::flight::fly`) reads the upstream through the leader's tee for every reader, so the leader's
+      client leaving doesn't cancel it while others read; when the last reader leaves, the task drops the upstream,
+      which stops Ollama. Joined requests waiting for headers get the leader's error if its call fails first.
+- [x] The leader's exchange is the upstream call (tokens, GPU time); each joined request has its own record with
+      cache note `joined` and the leader's id.
+- [x] Follows the cache's rules; `join = false` per app turns it off.
 
 ### 3.6 Cache metrics
-- [ ] Hits, misses, bypasses and joins per app; saved tokens; saved GPU-seconds (the stored `total_duration`);
-      entries and bytes. In Prometheus now, on the dashboard in phase 4.
+- [x] Prometheus: `jetway_cache_total{app,result}`, `jetway_cache_saved_tokens_total`,
+      `jetway_cache_saved_gpu_seconds_total`, `jetway_cache_entries`, `jetway_cache_memory_bytes`, `jetway_flights`.
+      Rollups gain cache hits, joins, saved tokens and saved GPU time per minute (for phase 4's charts).
 
 ## Tests
-- [ ] Key table: field order, left-out fields, number forms, defaults not filled, app partitioning.
-- [ ] Cacheability rules: errors, cancelled, truncated, `done_reason`, sampled policy, request controls.
-- [ ] Every combination of stored and requested stream mode, in both protocols, against golden files.
-- [ ] Joined requests: 10 identical concurrent requests give one upstream call and 10 identical answers; the first
-      client disconnects and the others still finish; all disconnect and the fake Ollama sees its connection closed.
-- [ ] Persistence: entries survive a restart; TTL expiry with an injected clock; eviction by size.
+- [x] Key table: field order, ignored fields, number forms, defaults not filled, scope and path, join keys.
+- [x] Cacheability: an upstream 500, a mid-stream failure and a cancelled stream aren't stored; request controls;
+      the `sampled = "skip"` policy; another app or temperature is a miss.
+- [x] Stored and requested stream mode in every combination, both protocols, thinking and tool calls (unit tests
+      over the golden files); hits in the other mode end to end; OpenAI usage added on request; embeddings.
+- [x] Joined requests: 10 identical concurrent requests give one upstream call and 10 identical bodies (9 joined);
+      the first client leaving doesn't cancel the others; everyone leaving closes the upstream connection within
+      150 ms; a leader's 504 reaches the joined request; joined unstreamed requests end `ok`.
+- [x] Persistence across a restart (a new Jetway on the same database answers from SQLite); expiry and the sweep;
+      `cache clear`; paced replay takes about the original generation time; Prometheus counts.
 
 ## Done when
-- [ ] A repeated `ollama run` prompt and a repeated `/v1/chat/completions` request are answered from the cache, with
-      the first byte in under 2 ms.
-- [ ] A restart keeps the cache, and `jetway cache stats` shows the hits.
-- [ ] The joined-request tests pass, and the phase 1 overhead targets still hold on misses.
+- [x] A repeated `ollama run` prompt is answered from the cache: 6 079 ms the first time (cold model), 125 ms the
+      second (most of it the CLI), 123 ms after a restart (from SQLite), checked live on 2026-10-25. The bench: a
+      hit's whole round trip is **0.171 ms** p50 and 0.317 ms p99.
+- [x] A restart keeps the cache, and `jetway cache stats` shows the hits.
+- [x] The joined-request tests pass, and the overhead targets still hold on misses (0.091 ms p50, 0.137 ms p99
+      added per request with the cache bypassed).
+
+## What was built (2026-10-25)
+
+- `cache` (`mod`: decision, lookup, the cache sink; `key`; `answer`: entries and serving; `flight`: joined
+  requests), `proxy::served` (bodies for hits and flight readers), migration 2 and `store::cache_rows`, cache
+  metrics, the `cache` commands, `tests/cache.rs` (16 tests).
+- The gateway now owns the cache and puts it first in its sink chain; `Gateway::new` takes an optional store.
+- Found live: hits sent with a `Content-Length` were recorded as cancelled, because hyper stops polling a body once
+  it has sent the declared length; served and joined bodies now count as delivered when their last byte is handed
+  over (the same lesson as phase 1's `expected_len`).
+- `serde_json` now has `preserve_order`, so written bodies keep Ollama's field order (model first) and Jetway's own
+  OpenAI error bodies match Ollama's (`message`, `type`, `param`, `code`); the cache key sorts keys itself and
+  doesn't depend on it.
+- Test harnesses start with the cache off, since pass-through and log tests send identical requests on purpose;
+  cache tests turn it on.
+
+### Rust notes
+- **Hand-written waker lists.** A flight [`Reader`](../../src/cache/flight.rs) implements `Stream` by checking the
+  shared chunk list under a mutex; when there's nothing new it stores `cx.waker().clone()` and returns `Pending`.
+  `Flight::push` takes the stored wakers out *before* waking them, so no lock is held while other tasks run.
+- **Reference counting decides lifetimes.** Each `Reader` increments an `AtomicUsize`; its `Drop` decrements it and,
+  at zero, cancels a `CancellationToken` that the flight task is `select!`ing on. Dropping the task's tee then
+  closes the upstream connection: the whole "stop when everyone leaves" rule is three `Drop`s.
+- **`Arc<Self>` receivers.** `fn reader(self: &Arc<Self>)` lets a method hand out new `Arc` clones of the flight it
+  is called on, which a plain `&self` can't.
+- **`watch` channels for "has it started yet".** `Flight::wait_start` uses `watch::Receiver::wait_for`, which
+  returns at once if the value is already set; a `oneshot` couldn't serve several waiting joiners.
+- **Closures that borrow, then a move.** In the handler, `fail_flight` borrows `leader`; the borrow ends at its last
+  use, so `match leader` can move it afterwards (non-lexical lifetimes) ([server/mod.rs](../../src/server/mod.rs)).
+- **Trait objects in a `Vec`.** The gateway builds `Sinks(vec![cache as Arc<dyn Sink>, sink])`: the `as` cast turns
+  an `Arc<Cache>` into an `Arc<dyn Sink>`, so different sink types share one list.
+- **Feature flags change behaviour crate-wide.** Turning on `serde_json/preserve_order` changes `serde_json::Map`
+  for every crate in the build that uses it, which is why the cache key sorts keys explicitly instead of relying on
+  the map's order.

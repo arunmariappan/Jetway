@@ -10,7 +10,8 @@ and shows all of it live on a dashboard.
 Jetway is one Rust binary. It speaks Ollama's own API and Ollama's OpenAI-compatible API, so it works with PaperPilot
 (.NET, OllamaSharp), BlackBox's OpsDesk agent (Python, `ollama`), the `ollama` CLI and any OpenAI client.
 
-> **Status (2026-10-25):** plan approved; phases 0–2 (bootstrap, pass-through, request log) done; phase 3 (exact cache) next.
+> **Status (2026-10-25):** plan approved; phases 0–3 (bootstrap, pass-through, request log, exact cache) done; phase 4
+> (dashboard, the MVP) next.
 
 | File | What it covers |
 |---|---|
@@ -206,7 +207,7 @@ Use the newest stable version of each when its phase starts, and let `Cargo.lock
 | Logs and traces | `tracing`, `tracing-subscriber`; spans encoded with `opentelemetry-proto` and `prost` and posted by Jetway (phase 2: the SDK's thread-based exporter isn't needed for spans built after the fact) |
 | Storage | `rusqlite` (`bundled`; migrations are Jetway's own, `user_version`-based), `zstd` |
 | Hashing, IDs, time | `blake3`, `ulid`, `jiff` |
-| Cache | `moka` (`future`) |
+| Cache | `moka` (`sync`: a lookup never waits), `blake3` |
 | Embeddings | `fastembed` (ONNX Runtime through `ort`) |
 | Injection classifier | `ort`, `tokenizers` |
 | Personal data | `regex` |

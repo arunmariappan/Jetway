@@ -4,8 +4,8 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Jetway is an LLM gateway in Rust between apps and the host Ollama: streaming pass-through for Ollama's API and the
 OpenAI-compatible API, exact and semantic caches, joined in-flight requests, personal-data and prompt-injection
-guards, thinking on/off routing for `qwen3.5:4b`, budgets, a priority queue and a live dashboard. **Phases 0–2
-(bootstrap, pass-through, request log) are done; phase 3 (exact cache) is next.** Read [docs/plan/README.md](docs/plan/README.md) and the current phase file before working; each phase
+guards, thinking on/off routing for `qwen3.5:4b`, budgets, a priority queue and a live dashboard. **Phases 0–3
+(bootstrap, pass-through, request log, exact cache) are done; phase 4 (dashboard, the MVP) is next.** Read [docs/plan/README.md](docs/plan/README.md) and the current phase file before working; each phase
 file has tasks, tests and "done when" items to tick, and ends with a "What was built" section (with "Rust notes",
 plan D20) recording decisions and what is left. Keep the plan's status line and the README in step when a phase
 lands.
@@ -38,6 +38,7 @@ cargo run -- check-config                     # merged configuration (defaults, 
 cargo run -- serve                            # gateway :8300 → upstream.url, admin :8301 (/metrics, /healthz)
 cargo run -- requests tail -f [--app A]       # the request log (data/jetway.db); `requests show <id> --bodies`
 cargo run -- db migrate | db prune --older-than 7d
+cargo run -- cache stats | cache list [--app A] | cache clear [--app A]
 cargo run -- fake-ollama --port 8399          # fake upstream; JETWAY__UPSTREAM__URL=http://127.0.0.1:8399 to use it
 cargo bench --bench overhead                  # added latency per request and per chunk (release build)
 OLLAMA_HOST=127.0.0.1:8300 ollama run qwen3.5:4b "hi"   # the ollama CLI through Jetway (app "default")
@@ -58,6 +59,9 @@ cargo deny check                              # licences, advisories, duplicates
 - `src/store/`: `Store` (writer thread, read pool), `schema.rs` (migrations; add a new script to `MIGRATIONS`, never
   edit an applied one), `row.rs` (`ExchangeRow`, `RollupRow`, SQL), `sink.rs` (`RequestLog`).
 - `src/metrics/`: rollups and Prometheus text. `src/telemetry/`: span ids, spans, OTLP export.
+- `src/cache/`: `mod.rs` (decision per request, lookup memory then SQLite, the cache sink that stores answers),
+  `key.rs` (canonical blake3 key, join key), `answer.rs` (`Entry`, `Answer`, serving a hit in either stream mode),
+  `flight.rs` (joined requests). `src/proxy/served.rs`: bodies for hits and flight readers.
 - `src/app.rs`: starts and stops everything `serve` runs; tests use it through `tests/common::Stack`.
 - `tests/common/`: `Harness` (fake + gateway only) and `Stack` (the whole app with a temporary database).
   `tests/pass_through.rs`: phase 1; `tests/request_log.rs`: phase 2.
@@ -83,6 +87,12 @@ cargo deny check                              # licences, advisories, duplicates
 - Sinks run in order (`Sinks`): metrics, the store, spans, then extras (log, test collector). A test that has seen
   an exchange in its `Collect` sink must still `store.flush().await` before reading the database (`Stack::settle`).
 - Exchange ids must come from `server::next_id()` (monotonic): the log pages by id.
+- A body that hyper reads with a `Content-Length` (or never reads: HEAD) is dropped without a final poll, so every
+  body type ends its exchange as `ok` when its last byte is handed over (`TeeBody::expected_len`, `ServedBody`,
+  `FlightBody`). Forget that and finished exchanges show as `client_cancelled`.
+- Test harnesses (`Harness`, `Stack`) start with `cache.exact = false`; tests that want the cache turn it on.
+- `serde_json` has `preserve_order`; the cache key must keep sorting keys itself (`cache::key`).
+- Streamed and unstreamed versions of the same request share a cache key (`stream` isn't part of it).
 - `jetway.toml` must keep matching `Config::default()` (a test checks); new settings go in both.
 - Fake-Ollama scripts go in the `x-fake-script` request header (JSON); Jetway forwards it like any other header.
 - On Windows a refused loopback connection takes ~2 s (the OS retries), so "Ollama is down" is slow until phase 9's
