@@ -1,6 +1,7 @@
 //! Configuration: defaults, then `jetway.toml`, then `JETWAY__*` environment variables (`__` separates sections,
 //! so `JETWAY__SERVER__PORT=9000` sets `server.port`). Unknown keys are errors, so typos don't pass silently.
 
+use std::collections::{BTreeMap, HashMap};
 use std::net::{IpAddr, Ipv4Addr};
 use std::path::{Path, PathBuf};
 
@@ -16,6 +17,8 @@ pub const ENV_PREFIX: &str = "JETWAY__";
 pub struct Config {
     pub server: ServerConfig,
     pub upstream: UpstreamConfig,
+    /// Per-app settings by app name. Apps that aren't listed use `default`'s settings, or built-in defaults.
+    pub apps: BTreeMap<String, AppConfig>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -31,6 +34,8 @@ pub struct ServerConfig {
     pub max_request_bytes: usize,
     /// How long in-flight streams may finish after Ctrl+C.
     pub shutdown_grace_seconds: u64,
+    /// When true, requests from apps not listed under `[apps]` get 403.
+    pub require_known_app: bool,
 }
 
 impl Default for ServerConfig {
@@ -41,6 +46,7 @@ impl Default for ServerConfig {
             admin_port: 8301,
             max_request_bytes: 64 * 1024 * 1024,
             shutdown_grace_seconds: 30,
+            require_known_app: false,
         }
     }
 }
@@ -70,6 +76,16 @@ impl Default for UpstreamConfig {
             slots: 1,
         }
     }
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct AppConfig {
+    /// Bearer keys that identify this app (`Authorization: Bearer <key>`). Labels for OpenAI clients, not secrets:
+    /// Jetway listens on loopback only.
+    pub keys: Vec<String>,
+    /// May use Ollama's model-management endpoints (`pull`, `delete`, `create`, ...).
+    pub admin: bool,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -149,6 +165,20 @@ impl Config {
         }
         if upstream.slots == 0 {
             problems.push("upstream.slots must be at least 1".into());
+        }
+
+        let mut key_owner = HashMap::new();
+        for (name, app) in &self.apps {
+            if !is_valid_name(name) {
+                problems.push(format!("app name {name:?} must match [a-z0-9-]{{1,32}}"));
+            }
+            for key in &app.keys {
+                if key.trim().is_empty() {
+                    problems.push(format!("apps.{name}.keys has an empty key"));
+                } else if let Some(other) = key_owner.insert(key.as_str(), name.as_str()) {
+                    problems.push(format!("apps.{name} and apps.{other} share a key"));
+                }
+            }
         }
 
         if problems.is_empty() {
@@ -273,6 +303,29 @@ mod tests {
             )?;
             let problems = problems(load_in(jail));
             assert_eq!(problems.len(), 5, "{problems:#?}");
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn apps_and_keys() {
+        Jail::expect_with(|jail| {
+            jail.create_file(
+                "jetway.toml",
+                "[apps.paperpilot]
+keys = [\"pp\"]
+
+[apps.ops]
+keys = [\"pp\"]
+admin = true
+
+[apps.Bad]
+",
+            )?;
+            let problems = problems(load_in(jail));
+            assert_eq!(problems.len(), 2, "{problems:#?}");
+            assert!(problems.iter().any(|p| p.contains("share a key")));
+            assert!(problems.iter().any(|p| p.contains("\"Bad\"")));
             Ok(())
         });
     }
