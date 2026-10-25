@@ -19,6 +19,11 @@ OpenTelemetry spans join the app's trace when configured.
 - [ ] A response accumulator per protocol: content, thinking, tool calls, `done_reason`, token counts and Ollama's
       durations, or OpenAI's `usage` when present. When OpenAI's stream has no usage, token counts are marked
       unknown, never guessed.
+- [ ] Decide (spike S1 showed Ollama sends usage in streams only with `stream_options.include_usage`): either accept
+      unknown token counts for such streams, or have Jetway ask for usage upstream and drop the usage-only event
+      (`choices: []`) for clients that didn't ask. The second keeps budgets exact but touches the forward path at the
+      stream's end; record the choice as a decision.
+- [ ] Ollama's final chunk also has `prompt_eval_cached_count` (prompt tokens served from its cache); keep it.
 
 ### 2.2 Exchange record
 

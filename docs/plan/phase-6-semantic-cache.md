@@ -9,8 +9,11 @@ a wrong answer served from the cache is much worse than a miss.
 ## Tasks
 
 ### 6.1 Embedder (D10)
-- [ ] `embed::Embedder` trait with two implementations: `FastEmbedder` (`fastembed`, `BAAI/bge-small-en-v1.5`, 384
-      dimensions, normalised) and `HashingEmbedder` (feature hashing of word n-grams, for tests and CI).
+- [ ] `embed::Embedder` trait with two implementations: `FastEmbedder` (`fastembed`, fp32, 384 dimensions,
+      normalised; `BAAI/bge-small-en-v1.5` or `all-MiniLM-L6-v2`, D10) and `HashingEmbedder` (feature hashing of word
+      n-grams, for tests and CI).
+- [ ] Threads from spike S2: bge-small is fastest with 8 intra-op threads, MiniLM-L6 with 4. One embedding runs at
+      a time per model (a semaphore), since each already uses several cores.
 - [ ] Inference in `spawn_blocking` behind a semaphore sized from spike S2; small batches when several requests
       wait at once.
 - [ ] Model files in `data/models/`, fetched by `jetway models fetch` or on first use; the model loads at startup
@@ -81,8 +84,11 @@ a wrong answer served from the cache is much worse than a miss.
       exchange for the router (phase 8).
 
 ### 6.8 Latency
-- [ ] On an exact hit, 0 ms added; on an exact miss, the embedding plus the search, target p95 under 15 ms. The
-      dashboard shows the semantic stage's time separately.
+- [ ] On an exact hit, 0 ms added; on an exact miss, the embedding plus the search, target p95 under 15 ms for a
+      typical question (up to about 32 tokens). Spike S2 measured bge-small at 9.6 ms p95 for 16 tokens and 21.5 ms
+      for 64; MiniLM-L6 at 6.4 and 13.2 ms. The dashboard shows the semantic stage's time separately.
+- [ ] `jetway eval semantic` runs both embedding models on the same pairs; the report picks the model (D10) by
+      precision and recall first, latency second.
 
 ## Tests
 - [ ] Slot extraction: each template, the fallback to the last user message, requests with no slot.
@@ -98,4 +104,4 @@ a wrong answer served from the cache is much worse than a miss.
       lower confidence bound stated).
 - [ ] A capped PaperPilot run with paraphrased questions shows semantic hits on the guardrail step and on RAG
       answers with identical context, and no wrong hit on reviewed pairs.
-- [ ] The semantic stage's p95 is under 15 ms on this PC.
+- [ ] The semantic stage's p95 is under 15 ms on this PC for typical questions.

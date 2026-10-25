@@ -39,8 +39,10 @@ defaults (`flag` and `monitor`) change no request and add no latency.
 - [ ] Stored bodies are redacted when the app's action is `redact` or `store_redacted = true` (R11).
 
 ### 7.3 Injection classifier
-- [ ] The model chosen in spike S3, through `ort` and `tokenizers`, int8 when available, loaded only when an app
-      uses it.
+- [ ] `Horizon-Labs/prompt-injection-guard-small` (spike S3; int8 ONNX, inputs `input_ids` and `attention_mask`,
+      labels `SAFE`/`INJECTION`), through `ort` and `tokenizers`, loaded only when an app uses it.
+- [ ] Cost from spike S3 (8 threads): 44 ms for 64 tokens, 126 ms for 256, 288 ms for 512. Scanning a whole RAG
+      context (`scan = "all"`) costs about a second of CPU per request, which is why it is monitor-only.
 - [ ] Input: the scanned text in 512-token windows with an overlap, at most 4 windows per request (the start and end
       of longer texts); the score is the highest window's.
 - [ ] A small rule detector next to it (`injection_rules`: phrases such as "ignore previous instructions", role
@@ -53,7 +55,9 @@ defaults (`flag` and `monitor`) change no request and add no latency.
       papers about prompt injection (R5); this is measured and shown, never enforced by default.
 
 ### 7.5 Evals (D19)
-- [ ] `evals/injection/`: the test split of `deepset/prompt-injections` (Apache-2.0); `paperpilot-benign.jsonl`, 100
+- [ ] `evals/injection/`: the test split of `deepset/prompt-injections` (116 rows; its card says Apache-2.0,
+      the dataset viewer says CC-BY-4.0, so credit it either way; it mixes English and German, and labels role-play
+      prompts as injections); `paperpilot-benign.jsonl`, 100
       research questions, including ones about jailbreaks, red-teaming and prompt injection; 30 hand-written attacks
       phrased like research questions.
 - [ ] `evals/pii/`: synthetic messages with known spans, using fake values that pass the checksums, plus look-alikes

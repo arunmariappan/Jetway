@@ -26,6 +26,8 @@ reaches the client in its own protocol's error format.
 ### 1.3 App identity (D12)
 - [ ] In order: path prefix `/a/{app}/` (stripped before routing), `X-Jetway-App` header, a bearer key listed in
       `[apps.<name>] keys = [...]`, otherwise `default`.
+- [ ] `/a/{app}` and `/a/{app}/` with nothing after them mean `/`: OllamaSharp's "is Ollama running" check requests
+      its base address itself (spike S4).
 - [ ] `server.require_known_app = false` by default; when true, an unknown app gets 403.
 - [ ] The app's name goes on the exchange and on log lines (a `tracing` span field).
 

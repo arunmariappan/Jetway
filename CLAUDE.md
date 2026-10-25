@@ -4,8 +4,8 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Jetway is an LLM gateway in Rust between apps and the host Ollama: streaming pass-through for Ollama's API and the
 OpenAI-compatible API, exact and semantic caches, joined in-flight requests, personal-data and prompt-injection
-guards, thinking on/off routing for `qwen3.5:4b`, budgets, a priority queue and a live dashboard. **Phase 0 is in
-progress.** Read [docs/plan/README.md](docs/plan/README.md) and the current phase file before working; each phase
+guards, thinking on/off routing for `qwen3.5:4b`, budgets, a priority queue and a live dashboard. **Phase 0 is
+done; phase 1 (pass-through) is next.** Read [docs/plan/README.md](docs/plan/README.md) and the current phase file before working; each phase
 file has tasks, tests and "done when" items to tick, and ends with a "What was built" section (with "Rust notes",
 plan D20) recording decisions and what is left. Keep the plan's status line and the README in step when a phase
 lands.
@@ -56,4 +56,25 @@ cargo deny check                              # licences, advisories, duplicates
 - Clippy denies `unwrap`/`expect` outside tests (`clippy.toml` allows them in tests). `figment::Jail` tests need
   `#[allow(clippy::result_large_err)]`, because Jail fixes the closure's error type.
 - Microsoft Defender excludes `D:\ai_workspace\Jetway\target` (added 2026-10-25 at the user's request) for faster
-  builds.
+  builds. Throwaway spike crates build with `CARGO_TARGET_DIR=D:/ai_workspace/Jetway/target/spikes` to benefit.
+- Pushing needs the user's GitHub login for this repo's URL (`credential.usehttppath` is on globally, so BlackBox's
+  saved login doesn't apply). Don't copy credentials between entries; ask the user to sign in once.
+
+## Spike findings (phase 0, 2026-10-25)
+
+- **Ollama 0.40.11 (S1):** `OLLAMA_NUM_PARALLEL:1`, `OLLAMA_MAX_QUEUE:512`: requests run one at a time, so
+  `upstream.slots = 1`. A client disconnect stops generation at once (log: `srv stop: cancel task`). Native streams
+  are NDJSON; the final line carries `done_reason`, durations, `prompt_eval_count`, `prompt_eval_cached_count` and
+  `eval_count` (which includes thinking tokens). Thinking: `message.thinking` (native), `delta.reasoning` (OpenAI;
+  `reasoning_effort: "none"` turns it off). OpenAI streams carry `usage` only with `stream_options.include_usage`,
+  as a `choices: []` event with llama-server `timings`. `qwen3.5:4b` can't embed (501). Golden files:
+  `tests/fixtures/ollama/` (byte-exact, `-text`).
+- **Embeddings (S2):** fastembed 7.5 / ort 2.0.0-rc.15 build fine with MSVC. fp32 beats int8 on this Zen 2 CPU.
+  bge-small, 8 threads: 9.6 ms p95 at 16 tokens, 21.5 ms at 64. MiniLM-L6, 4 threads: 6.4 and 13.2 ms. Phase 6's
+  eval picks the model.
+- **Injection classifier (S3):** `Horizon-Labs/prompt-injection-guard-small` (int8 ONNX, Apache-2.0): 44 ms at 64
+  tokens, 288 ms at 512, ~400 MB; 0/30 benign research questions flagged, 10/10 research-style attacks caught at 0.9.
+  ProtectAI's DeBERTa v2 flagged 3/30 benign and is twice as slow; wolf-defender's ONNX alone is uncalibrated.
+- **Base paths (S4):** OllamaSharp 5.5.0 uses relative paths against `BaseAddress` (PaperPilot adds the trailing
+  slash) and checks "is running" with a GET of the base address itself, so `/a/{app}/` must mean `/`. ollama-python
+  keeps a path in `host` too.
