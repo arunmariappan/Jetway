@@ -10,7 +10,7 @@ and shows all of it live on a dashboard.
 Jetway is one Rust binary. It speaks Ollama's own API and Ollama's OpenAI-compatible API, so it works with PaperPilot
 (.NET, OllamaSharp), BlackBox's OpsDesk agent (Python, `ollama`), the `ollama` CLI and any OpenAI client.
 
-> **Status (2026-10-25):** plan approved; phases 0 (bootstrap) and 1 (pass-through) done; phase 2 (request log) next.
+> **Status (2026-10-25):** plan approved; phases 0–2 (bootstrap, pass-through, request log) done; phase 3 (exact cache) next.
 
 | File | What it covers |
 |---|---|
@@ -55,6 +55,7 @@ recommendations; change any of them here during review.
 | D17 | Network | **Listens on 127.0.0.1 only; upstream URLs use `127.0.0.1`, not `localhost`; `TCP_NODELAY` on every socket** | Windows resolves `localhost` to `::1` first, and a refused IPv6 connection costs about 2 seconds (found in PaperPilot). Without `TCP_NODELAY`, small stream chunks wait about 40 ms for a delayed ACK (found in BlackBox). |
 | D18 | Tests and CI | **No GPU or Ollama in tests; GitHub Actions on Ubuntu and Windows** | Tests run against `jetway fake-ollama`, which replays real responses recorded in spike S1 with scripted timing, errors and drops. CI uses a hashing embedder and a stub classifier, so no model is downloaded. CI runs format, Clippy with warnings as errors, tests and `cargo-deny` (licences, advisories). |
 | D19 | Evals | **Every ML decision has a committed eval and report** | Semantic-cache precision and recall against the threshold, injection and personal-data precision, recall and false-positive rate, router accuracy against latency. Datasets live in `evals/`, reports in `reports/`. Thresholds in `jetway.toml` come from these reports, never from guesses. |
+| D21 | OpenAI stream usage | **Jetway asks for usage in OpenAI streams and hides it from clients that didn't ask** (decided in phase 2) | Ollama sends token counts in an OpenAI stream only with `stream_options.include_usage` (spike S1). Jetway adds it upstream and removes the usage-only event (`choices: []`) on the way out, so every stream has exact token counts for the log and budgets. Whole events pass untouched; only an event split across chunks waits for its end. |
 | D20 | Rust notes | **Claude writes and tests the code; each phase's "What was built" section ends with "Rust notes"** (your choice) | A few short explanations of the Rust ideas the phase used (for example ownership in the stream tee, `Send` and `Sync`, async cancellation, `spawn_blocking`), each with links to the code. Jetway is the warm-up for AirMarshal, so the notes build up what that project needs. |
 
 ### Goals
@@ -202,8 +203,8 @@ Use the newest stable version of each when its phase starts, and let `Cargo.lock
 | Configuration | `figment` (`toml`, `env`) |
 | CLI | `clap` (derive) |
 | Errors | `thiserror` in the library, `anyhow` in `main.rs` and dev tools |
-| Logs and traces | `tracing`, `tracing-subscriber`, `opentelemetry`, `opentelemetry_sdk`, `opentelemetry-otlp`, `tracing-opentelemetry` |
-| Storage | `rusqlite` (`bundled`), `rusqlite_migration`, `zstd` |
+| Logs and traces | `tracing`, `tracing-subscriber`; spans encoded with `opentelemetry-proto` and `prost` and posted by Jetway (phase 2: the SDK's thread-based exporter isn't needed for spans built after the fact) |
+| Storage | `rusqlite` (`bundled`; migrations are Jetway's own, `user_version`-based), `zstd` |
 | Hashing, IDs, time | `blake3`, `ulid`, `jiff` |
 | Cache | `moka` (`future`) |
 | Embeddings | `fastembed` (ONNX Runtime through `ort`) |
@@ -211,7 +212,7 @@ Use the newest stable version of each when its phase starts, and let `Cargo.lock
 | Personal data | `regex` |
 | Router | `linfa`, `linfa-logistic`, `ndarray` |
 | Limits | `governor` |
-| Metrics | `hdrhistogram`, `metrics`, `metrics-exporter-prometheus` |
+| Metrics | `hdrhistogram`, `memory-stats`; Prometheus text rendered by Jetway (phase 2) |
 | Dashboard | `askama` (+ its axum integration), `rust-embed`, `plotters` (SVG backend) |
 | Load generator | `rand`, `hdrhistogram` |
 | Dev | `insta` (snapshots), `proptest`, `criterion`, `tempfile` |

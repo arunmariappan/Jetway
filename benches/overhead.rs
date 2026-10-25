@@ -1,23 +1,15 @@
 //! Phase 1.10: the latency Jetway adds, per request and per stream chunk, against the fake Ollama with no delays.
 //! `cargo bench --bench overhead` (release build). Targets: p50 under 0.3 ms and p99 under 1 ms per request at
-//! concurrency 1; p99 under 0.5 ms per chunk.
+//! concurrency 1; p99 under 0.5 ms per chunk. Runs the whole of `jetway serve` (recording, store, metrics), with
+//! a temporary database.
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
-use std::sync::Arc;
 use std::time::Duration;
 
 use jetway::config::Config;
 use jetway::dev::fake_ollama::{self, SCRIPT_HEADER, Script};
-use jetway::proxy::record::{Finished, Sink};
-use jetway::server::{self, Gateway};
 use tokio::net::TcpListener;
 use tokio::time::Instant;
-
-struct Discard;
-
-impl Sink for Discard {
-    fn finished(&self, _: Finished) {}
-}
 
 fn percentile(sorted: &[Duration], p: f64) -> Duration {
     sorted[((sorted.len() - 1) as f64 * p).round() as usize]
@@ -33,12 +25,14 @@ const STREAM_CHUNKS: usize = 200;
 #[tokio::main]
 async fn main() {
     let fake = fake_ollama::spawn_local(Script::default()).await.unwrap();
+    let dir = std::env::temp_dir().join(format!("jetway-bench-{}", std::process::id()));
     let mut config = Config::default();
     config.upstream.url = fake.url();
-    let gateway = Gateway::new(config, Arc::new(Discard)).unwrap();
-    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let jetway = format!("http://{}", listener.local_addr().unwrap());
-    tokio::spawn(server::run(listener, gateway, std::future::pending()));
+    config.store.path = dir.join("jetway.db");
+    let gateway = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let admin = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let running = jetway::app::start(config, gateway, admin, Vec::new()).await.unwrap();
+    let jetway = format!("http://{}", running.gateway_addr);
     let client = reqwest::Client::builder().no_proxy().tcp_nodelay(true).build().unwrap();
     let body = r#"{"model":"qwen3.5:4b","messages":[{"role":"user","content":"hi"}],"stream":false}"#;
 
@@ -100,4 +94,12 @@ async fn main() {
             ms(percentile(&delays, 1.0))
         );
     }
+    let recorded = running.store.count().await.unwrap();
+    println!(
+        "recorded {recorded} exchanges, {} dropped",
+        running.store.counters.dropped.load(std::sync::atomic::Ordering::Relaxed)
+    );
+    running.stop();
+    running.wait().await.unwrap();
+    let _ = std::fs::remove_dir_all(dir);
 }

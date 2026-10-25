@@ -4,8 +4,8 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Jetway is an LLM gateway in Rust between apps and the host Ollama: streaming pass-through for Ollama's API and the
 OpenAI-compatible API, exact and semantic caches, joined in-flight requests, personal-data and prompt-injection
-guards, thinking on/off routing for `qwen3.5:4b`, budgets, a priority queue and a live dashboard. **Phases 0
-(bootstrap) and 1 (streaming pass-through) are done; phase 2 (request log) is next.** Read [docs/plan/README.md](docs/plan/README.md) and the current phase file before working; each phase
+guards, thinking on/off routing for `qwen3.5:4b`, budgets, a priority queue and a live dashboard. **Phases 0–2
+(bootstrap, pass-through, request log) are done; phase 3 (exact cache) is next.** Read [docs/plan/README.md](docs/plan/README.md) and the current phase file before working; each phase
 file has tasks, tests and "done when" items to tick, and ends with a "What was built" section (with "Rust notes",
 plan D20) recording decisions and what is left. Keep the plan's status line and the README in step when a phase
 lands.
@@ -35,7 +35,9 @@ cargo test                                    # never needs Ollama, a GPU or a d
 cargo test config::tests::file_then_environment   # a single test
 cargo test -- --ignored                       # tests that need real models (later phases)
 cargo run -- check-config                     # merged configuration (defaults, jetway.toml, JETWAY__* env)
-cargo run -- serve                            # gateway on 127.0.0.1:8300 → upstream.url (JETWAY_LOG=debug for more)
+cargo run -- serve                            # gateway :8300 → upstream.url, admin :8301 (/metrics, /healthz)
+cargo run -- requests tail -f [--app A]       # the request log (data/jetway.db); `requests show <id> --bodies`
+cargo run -- db migrate | db prune --older-than 7d
 cargo run -- fake-ollama --port 8399          # fake upstream; JETWAY__UPSTREAM__URL=http://127.0.0.1:8399 to use it
 cargo bench --bench overhead                  # added latency per request and per chunk (release build)
 OLLAMA_HOST=127.0.0.1:8300 ollama run qwen3.5:4b "hi"   # the ollama CLI through Jetway (app "default")
@@ -51,7 +53,14 @@ cargo deny check                              # licences, advisories, duplicates
   lines), `tee` (`TeeBody`: forwards chunks, timeouts, cancellation), `record` (per-exchange recorder task, `Sink`,
   `Finished`).
 - `src/protocol/`: `Protocol` (by path) and `Framing` (by content type). `src/dev/fake_ollama.rs`: the fake.
-- `tests/common/`: harness (fake + gateway in-process, `Collect` sink). `tests/pass_through.rs`: phase 1.
+- `src/protocol/decode.rs` (NDJSON/SSE decoders), `summary.rs` (`RequestSummary`, `ResponseSummary`).
+  `src/proxy/usage.rs`: OpenAI usage asked for and hidden (plan D21).
+- `src/store/`: `Store` (writer thread, read pool), `schema.rs` (migrations; add a new script to `MIGRATIONS`, never
+  edit an applied one), `row.rs` (`ExchangeRow`, `RollupRow`, SQL), `sink.rs` (`RequestLog`).
+- `src/metrics/`: rollups and Prometheus text. `src/telemetry/`: span ids, spans, OTLP export.
+- `src/app.rs`: starts and stops everything `serve` runs; tests use it through `tests/common::Stack`.
+- `tests/common/`: `Harness` (fake + gateway only) and `Stack` (the whole app with a temporary database).
+  `tests/pass_through.rs`: phase 1; `tests/request_log.rs`: phase 2.
 - `jetway.toml`: committed defaults; a test checks it equals `Config::default()`, so change both together.
 - `docs/plan/`: the plan. Later phases add the modules listed in plan §3.
 
@@ -71,6 +80,10 @@ cargo deny check                              # licences, advisories, duplicates
 - Every exchange must end in exactly one `Finished` record. hyper drops a response body without reading to the end
   when it has sent the declared `Content-Length`, and never reads one for HEAD/204/304; the tee ends those as `ok`
   itself (`expected_len`). A dropped body otherwise means the client left (`client_cancelled`).
+- Sinks run in order (`Sinks`): metrics, the store, spans, then extras (log, test collector). A test that has seen
+  an exchange in its `Collect` sink must still `store.flush().await` before reading the database (`Stack::settle`).
+- Exchange ids must come from `server::next_id()` (monotonic): the log pages by id.
+- `jetway.toml` must keep matching `Config::default()` (a test checks); new settings go in both.
 - Fake-Ollama scripts go in the `x-fake-script` request header (JSON); Jetway forwards it like any other header.
 - On Windows a refused loopback connection takes ~2 s (the OS retries), so "Ollama is down" is slow until phase 9's
   circuit breaker; tests allow for it with `cfg!(windows)`.
