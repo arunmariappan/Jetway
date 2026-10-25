@@ -1,0 +1,10 @@
+{"model":"qwen3.5:4b","created_at":"2026-10-25T12:24:45.262686Z","response":"Hello","done":false}
+{"model":"qwen3.5:4b","created_at":"2026-10-25T12:24:45.2861476Z","response":" there","done":false}
+{"model":"qwen3.5:4b","created_at":"2026-10-25T12:24:45.3057786Z","response":",","done":false}
+{"model":"qwen3.5:4b","created_at":"2026-10-25T12:24:45.325821Z","response":" friend","done":false}
+{"model":"qwen3.5:4b","created_at":"2026-10-25T12:24:45.3448509Z","response":"!","done":false}
+{"model":"qwen3.5:4b","created_at":"2026-10-25T12:24:45.3629001Z","response":" How","done":false}
+{"model":"qwen3.5:4b","created_at":"2026-10-25T12:24:45.3804414Z","response":" are","done":false}
+{"model":"qwen3.5:4b","created_at":"2026-10-25T12:24:45.3970063Z","response":" you","done":false}
+{"model":"qwen3.5:4b","created_at":"2026-10-25T12:24:45.4134064Z","response":"?","done":false}
+{"model":"qwen3.5:4b","created_at":"2026-10-25T12:24:45.4307483Z","response":"","done":true,"done_reason":"stop","context":[248045,846,198,44240,23066,303,4097,4105,13,248046,198,248045,74455,198,248068,271,248069,271,9419,1017,11,4099,0,2500,513,488,30],"total_duration":357500600,"load_duration":9233400,"prompt_eval_count":18,"prompt_eval_cached_count":14,"prompt_eval_duration":86597000,"eval_count":10,"eval_duration":167457000}

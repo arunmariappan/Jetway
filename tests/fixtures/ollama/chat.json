@@ -1,0 +1,1 @@
+{"model":"qwen3.5:4b","created_at":"2026-10-25T12:24:29.34909Z","message":{"role":"assistant","content":"Hello there, friend! How are you?"},"done":true,"done_reason":"stop","total_duration":213644800,"load_duration":5903400,"prompt_eval_count":18,"prompt_eval_cached_count":14,"prompt_eval_duration":72298000,"eval_count":10,"eval_duration":132074000}

@@ -1,0 +1,1 @@
+{"id":"chatcmpl-937","object":"chat.completion","created":1792931086,"model":"qwen3.5:4b","system_fingerprint":"fp_ollama","choices":[{"index":0,"message":{"role":"assistant","content":"Hello there, friend! How are you?"},"finish_reason":"stop"}],"usage":{"prompt_tokens":18,"prompt_tokens_details":{"cached_tokens":14},"completion_tokens":10,"total_tokens":28}}

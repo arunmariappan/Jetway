@@ -4,3 +4,6 @@
 *.ico binary
 *.onnx binary
 *.zst binary
+
+# Recorded responses must stay byte for byte as captured.
+tests/fixtures/** -text
