@@ -16,6 +16,7 @@ use crate::protocol::decode::{NdjsonDecoder, SseDecoder};
 use crate::protocol::summary::{RequestSummary, ResponseSummary};
 use crate::protocol::{Framing, Protocol};
 use crate::server::routes::PathClass;
+use crate::telemetry::SpanIds;
 
 /// Recorded response bytes are capped; forwarding goes on past the cap, and the exchange is marked `truncated`.
 pub const RECORD_LIMIT: usize = 8 * 1024 * 1024;
@@ -38,9 +39,11 @@ pub struct Exchange {
     /// Parsed for generation and embedding requests.
     pub summary: Option<RequestSummary>,
     pub traceparent: Option<String>,
+    /// Set when spans are exported (`otel.endpoint`).
+    pub spans: Option<SpanIds>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Outcome {
     /// The upstream's complete response reached the client.
     Ok,

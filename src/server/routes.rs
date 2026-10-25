@@ -13,6 +13,18 @@ pub enum PathClass {
     Unknown,
 }
 
+impl PathClass {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Generation => "generation",
+            Self::Embedding => "embedding",
+            Self::Info => "info",
+            Self::ModelManagement => "model_management",
+            Self::Unknown => "unknown",
+        }
+    }
+}
+
 pub fn classify(path: &str) -> PathClass {
     match path {
         "/api/chat" | "/api/generate" | "/v1/chat/completions" | "/v1/completions" => PathClass::Generation,

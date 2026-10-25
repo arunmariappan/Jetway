@@ -7,6 +7,7 @@ port = 8300                        # gateway: Ollama and OpenAI-compatible APIs
 admin_port = 8301                  # dashboard, admin API, /metrics
 max_request_bytes = 67_108_864     # 64 MiB; image inputs are base64
 shutdown_grace_seconds = 30
+require_known_app = false          # true: apps not listed under [apps] get 403
 
 [upstream]
 name = "ollama"
@@ -15,3 +16,13 @@ connect_timeout_ms = 2000
 first_byte_timeout_seconds = 600   # long prompts on a busy GPU
 idle_timeout_seconds = 120         # longest silence between stream chunks
 slots = 1                          # requests sent at once (phase 9)
+
+[store]
+path = "data/jetway.db"
+bodies = "all"                     # none | errors | all (zstd-compressed)
+retention_days = 7                 # exchanges and bodies; 0 keeps them forever
+rollup_retention_days = 90         # per-minute rollups for history charts
+
+[otel]
+endpoint = ""                      # e.g. "http://127.0.0.1:8200" (BlackBox) or the Aspire dashboard's OTLP/HTTP port
+service_name = "jetway"

@@ -1,6 +1,7 @@
 //! The gateway listener (phase 1): app identity, the path allow-list, forwarding with the stream tee, and graceful
 //! shutdown.
 
+pub mod admin;
 pub mod identity;
 pub mod routes;
 
@@ -31,10 +32,19 @@ use crate::proxy::record::{Exchange, Outcome, Recorder, Sink, Timings, finish_wi
 use crate::proxy::tee::{InflightGuard, TeeBody, TeeParts};
 use crate::proxy::usage::{self, UsageFilter};
 use crate::proxy::{Upstream, errors, headers};
+use crate::telemetry::SpanIds;
 use identity::{DEFAULT_APP, KeyMap, identify};
 use routes::{PathClass, classify};
 
 pub const ID_HEADER: &str = "x-jetway-id";
+
+/// Exchange ids increase strictly, even within one millisecond, so ordering by id is ordering by arrival (the
+/// request log pages by id).
+pub fn next_id() -> Ulid {
+    static GENERATOR: std::sync::Mutex<ulid::Generator> = std::sync::Mutex::new(ulid::Generator::new());
+    let mut generator = GENERATOR.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    generator.generate().unwrap_or_else(|_| Ulid::generate())
+}
 
 /// Everything a request handler needs, shared by all requests.
 pub struct Gateway {
@@ -43,13 +53,16 @@ pub struct Gateway {
     keys: KeyMap,
     sink: Arc<dyn Sink>,
     inflight: Arc<AtomicUsize>,
+    /// Span ids are chosen per request only when spans are exported.
+    spans: bool,
 }
 
 impl Gateway {
     pub fn new(config: Config, sink: Arc<dyn Sink>) -> Result<Arc<Self>, reqwest::Error> {
         let upstream = Upstream::new(&config.upstream)?;
         let keys = KeyMap::from_config(&config);
-        Ok(Arc::new(Self { config, upstream, keys, sink, inflight: Arc::new(AtomicUsize::new(0)) }))
+        let spans = !config.otel.endpoint.is_empty();
+        Ok(Arc::new(Self { config, upstream, keys, sink, inflight: Arc::new(AtomicUsize::new(0)), spans }))
     }
 
     pub fn inflight(&self) -> usize {
@@ -58,6 +71,10 @@ impl Gateway {
 
     pub fn upstream_url(&self) -> &str {
         self.upstream.base()
+    }
+
+    pub fn config(&self) -> &Config {
+        &self.config
     }
 
     fn is_admin(&self, app: &str) -> bool {
@@ -104,9 +121,23 @@ pub async fn run(
     }
 }
 
-/// Binds the configured address.
+/// Serves the admin listener until `shutdown` completes.
+pub async fn run_admin(
+    listener: TcpListener,
+    admin: Arc<admin::Admin>,
+    shutdown: impl Future<Output = ()> + Send + 'static,
+) -> std::io::Result<()> {
+    axum::serve(listener, admin::router(admin)).with_graceful_shutdown(shutdown).await
+}
+
+/// Binds the configured gateway address.
 pub async fn bind(config: &Config) -> std::io::Result<TcpListener> {
     TcpListener::bind(SocketAddr::new(config.server.host, config.server.port)).await
+}
+
+/// Binds the configured admin address.
+pub async fn bind_admin(config: &Config) -> std::io::Result<TcpListener> {
+    TcpListener::bind(SocketAddr::new(config.server.host, config.server.admin_port)).await
 }
 
 /// Builds the error response for an exchange that ends before reaching the upstream, and records it.
@@ -162,7 +193,7 @@ async fn handle(State(gateway): State<Arc<Gateway>>, request: Request) -> Respon
         None => path.clone(),
     };
     let mut exchange = Exchange {
-        id: Ulid::generate(),
+        id: next_id(),
         app,
         method: parts.method.clone(),
         path: path_and_query.clone(),
@@ -172,6 +203,7 @@ async fn handle(State(gateway): State<Arc<Gateway>>, request: Request) -> Respon
         started_at: jiff::Timestamp::now(),
         request: Bytes::new(),
         summary: None,
+        spans: gateway.spans.then(|| SpanIds::new(traceparent.as_deref())),
         traceparent,
     };
     let mut timings = Timings::default();
@@ -224,11 +256,18 @@ async fn handle(State(gateway): State<Arc<Gateway>>, request: Request) -> Respon
         usage_filter = Some(UsageFilter::default());
     }
 
+    let mut upstream_headers = headers::to_upstream(&parts.headers);
+    if let Some(ids) = &exchange.spans
+        && let Ok(value) = HeaderValue::from_str(&ids.upstream_traceparent())
+    {
+        // Jetway's client span becomes the parent of whatever the upstream does (plan D16).
+        upstream_headers.insert("traceparent", value);
+    }
     let upstream = &gateway.upstream;
     let send = upstream
         .client
         .request(parts.method.clone(), upstream.url_for(&path_and_query))
-        .headers(headers::to_upstream(&parts.headers))
+        .headers(upstream_headers)
         .body(upstream_body)
         .send();
     timings.upstream_sent = Some(started.elapsed());

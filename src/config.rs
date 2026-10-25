@@ -17,6 +17,8 @@ pub const ENV_PREFIX: &str = "JETWAY__";
 pub struct Config {
     pub server: ServerConfig,
     pub upstream: UpstreamConfig,
+    pub store: StoreConfig,
+    pub otel: OtelConfig,
     /// Per-app settings by app name. Apps that aren't listed use `default`'s settings, or built-in defaults.
     pub apps: BTreeMap<String, AppConfig>,
 }
@@ -75,6 +77,48 @@ impl Default for UpstreamConfig {
             idle_timeout_seconds: 120,
             slots: 1,
         }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct StoreConfig {
+    /// The SQLite file; its directory is created if needed.
+    pub path: PathBuf,
+    /// Which request and response bodies are kept (zstd-compressed).
+    pub bodies: BodyPolicy,
+    /// Exchanges and bodies older than this are deleted hourly; 0 keeps them forever.
+    pub retention_days: u32,
+    /// Per-minute rollups are kept longer, for history charts.
+    pub rollup_retention_days: u32,
+}
+
+impl Default for StoreConfig {
+    fn default() -> Self {
+        Self { path: "data/jetway.db".into(), bodies: BodyPolicy::All, retention_days: 7, rollup_retention_days: 90 }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum BodyPolicy {
+    None,
+    /// Only for exchanges that didn't end `ok` with a 2xx status.
+    Errors,
+    All,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct OtelConfig {
+    /// OTLP/HTTP base URL, for example `http://127.0.0.1:8200` (BlackBox); empty turns spans off.
+    pub endpoint: String,
+    pub service_name: String,
+}
+
+impl Default for OtelConfig {
+    fn default() -> Self {
+        Self { endpoint: String::new(), service_name: "jetway".into() }
     }
 }
 
@@ -158,6 +202,12 @@ impl Config {
         }
         if upstream.slots == 0 {
             problems.push("upstream.slots must be at least 1".into());
+        }
+
+        if !self.otel.endpoint.is_empty()
+            && let Err(problem) = check_upstream_url(&self.otel.endpoint)
+        {
+            problems.push(format!("otel.endpoint {:?}: {problem}", self.otel.endpoint));
         }
 
         let mut key_owner = HashMap::new();

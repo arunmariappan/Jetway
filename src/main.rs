@@ -1,13 +1,16 @@
 use std::path::PathBuf;
 use std::process::ExitCode;
 use std::sync::Arc;
+use std::time::Duration;
 
 use anyhow::Context;
 use clap::{Parser, Subcommand};
+use jetway::app;
 use jetway::config::Config;
 use jetway::dev::fake_ollama;
 use jetway::proxy::record::LogSink;
-use jetway::server::{self, Gateway};
+use jetway::server;
+use jetway::store::{ExchangeRow, ListFilter, Store};
 use tracing_subscriber::EnvFilter;
 
 const DEFAULT_CONFIG: &str = "jetway.toml";
@@ -25,10 +28,20 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
-    /// Run the gateway.
+    /// Run the gateway and the admin listener.
     Serve,
     /// Load and validate the configuration, then print the merged result.
     CheckConfig,
+    /// Look at recorded exchanges.
+    Requests {
+        #[command(subcommand)]
+        command: RequestsCommand,
+    },
+    /// Maintain the request log.
+    Db {
+        #[command(subcommand)]
+        command: DbCommand,
+    },
     /// Run a fake Ollama that answers from recorded responses (for development and load tests).
     FakeOllama {
         #[arg(long, default_value_t = 8399)]
@@ -37,6 +50,43 @@ enum Command {
         #[arg(long)]
         script: Option<String>,
     },
+}
+
+#[derive(Subcommand)]
+enum RequestsCommand {
+    /// Print the latest exchanges, then (with --follow) new ones as they arrive.
+    Tail {
+        #[arg(long)]
+        app: Option<String>,
+        #[arg(long)]
+        outcome: Option<String>,
+        #[arg(long, default_value_t = 20)]
+        limit: usize,
+        #[arg(long, short)]
+        follow: bool,
+    },
+    /// Print one exchange in full.
+    Show {
+        id: String,
+        /// Include the request and response bodies.
+        #[arg(long)]
+        bodies: bool,
+    },
+}
+
+#[derive(Subcommand)]
+enum DbCommand {
+    /// Create or update the schema (serve does this too).
+    Migrate,
+    /// Delete exchanges older than a number of days, e.g. --older-than 7d.
+    Prune {
+        #[arg(long, value_parser = parse_days)]
+        older_than: i64,
+    },
+}
+
+fn parse_days(text: &str) -> Result<i64, String> {
+    text.trim_end_matches('d').parse::<i64>().map_err(|_| format!("{text:?} isn't a number of days like 7d"))
 }
 
 fn main() -> ExitCode {
@@ -63,6 +113,8 @@ fn run(cli: Cli) -> anyhow::Result<()> {
             Ok(())
         }
         Command::Serve => runtime()?.block_on(serve(config)),
+        Command::Requests { command } => runtime()?.block_on(requests(config, command)),
+        Command::Db { command } => runtime()?.block_on(db(config, command)),
         Command::FakeOllama { .. } => unreachable!("handled above"),
     }
 }
@@ -79,16 +131,20 @@ fn init_logging() {
 
 async fn serve(config: Config) -> anyhow::Result<()> {
     init_logging();
-    let listener = server::bind(&config)
-        .await
-        .with_context(|| format!("couldn't listen on {}:{}", config.server.host, config.server.port))?;
-    let gateway = Gateway::new(config, Arc::new(LogSink)).context("couldn't build the upstream client")?;
+    let (host, port, admin_port) = (config.server.host, config.server.port, config.server.admin_port);
+    let gateway = server::bind(&config).await.with_context(|| format!("couldn't listen on {host}:{port}"))?;
+    let admin = server::bind_admin(&config).await.with_context(|| format!("couldn't listen on {host}:{admin_port}"))?;
+    let running = app::start(config, gateway, admin, vec![Arc::new(LogSink)]).await?;
     tracing::info!(
-        "Jetway listening on http://{} and forwarding to {}",
-        listener.local_addr()?,
-        gateway.upstream_url()
+        "Jetway listening on http://{} (admin http://{}) and forwarding to {}; request log {}",
+        running.gateway_addr,
+        running.admin_addr,
+        running.gateway.upstream_url(),
+        running.store.path().display()
     );
-    server::run(listener, gateway, shutdown_signal()).await?;
+    shutdown_signal().await;
+    running.stop();
+    running.wait().await?;
     Ok(())
 }
 
@@ -97,6 +153,90 @@ async fn shutdown_signal() {
         // Without a signal handler, run until killed.
         std::future::pending::<()>().await;
     }
+}
+
+fn ms(us: Option<i64>) -> String {
+    us.map_or_else(|| "-".into(), |us| format!("{:.0}", us as f64 / 1000.0))
+}
+
+fn opt<T: ToString>(value: &Option<T>) -> String {
+    value.as_ref().map_or_else(|| "-".into(), ToString::to_string)
+}
+
+fn print_row(r: &ExchangeRow) {
+    let time = jiff::Timestamp::from_millisecond(r.started_at_ms).map_or_else(|_| "?".into(), |t| t.to_string());
+    println!(
+        "{time}  {}  {:<10} {:<6} {:<24} {:>3} {:<16} ttft {:>6} ms  total {:>7} ms  tokens {}/{}  {}",
+        r.id,
+        r.app,
+        r.method,
+        r.path,
+        r.status,
+        r.outcome,
+        ms(r.first_token_us),
+        ms(r.done_us),
+        opt(&r.prompt_tokens),
+        opt(&r.completion_tokens),
+        r.error.as_deref().unwrap_or("")
+    );
+}
+
+async fn requests(config: Config, command: RequestsCommand) -> anyhow::Result<()> {
+    let store = Store::open(&config.store.path)?;
+    match command {
+        RequestsCommand::Tail { app, outcome, limit, follow } => {
+            let mut filter = ListFilter { app, outcome, after: None, limit };
+            loop {
+                let rows = store.list(filter.clone()).await?;
+                for row in &rows {
+                    print_row(row);
+                }
+                if let Some(last) = rows.last() {
+                    filter.after = Some(last.id.clone());
+                } else if filter.after.is_none() {
+                    // An empty log: follow from the start.
+                    filter.after = Some(String::new());
+                }
+                if !follow {
+                    return Ok(());
+                }
+                filter.limit = 1000;
+                tokio::time::sleep(Duration::from_secs(1)).await;
+            }
+        }
+        RequestsCommand::Show { id, bodies } => {
+            let Some((row, stored)) = store.get(id.clone()).await? else {
+                anyhow::bail!("no exchange {id}");
+            };
+            println!("{row:#?}");
+            if bodies {
+                match stored {
+                    Some(b) => {
+                        println!("--- request ({} bytes)\n{}", b.request.len(), String::from_utf8_lossy(&b.request));
+                        println!("--- response ({} bytes)\n{}", b.response.len(), String::from_utf8_lossy(&b.response));
+                    }
+                    None => println!("(no bodies stored; see store.bodies)"),
+                }
+            }
+            Ok(())
+        }
+    }
+}
+
+async fn db(config: Config, command: DbCommand) -> anyhow::Result<()> {
+    match command {
+        DbCommand::Migrate => {
+            let version = Store::migrate_only(&config.store.path)?;
+            println!("{} is at schema version {version}", config.store.path.display());
+        }
+        DbCommand::Prune { older_than } => {
+            let store = Store::open(&config.store.path)?;
+            let before = jiff::Timestamp::now().as_millisecond() - older_than * 24 * 3600 * 1000;
+            let (exchanges, _) = store.prune(before, i64::MIN).await?;
+            println!("deleted {exchanges} exchanges older than {older_than} days");
+        }
+    }
+    Ok(())
 }
 
 async fn fake(port: u16, script: Option<&str>) -> anyhow::Result<()> {
