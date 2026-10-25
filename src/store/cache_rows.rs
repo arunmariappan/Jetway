@@ -73,6 +73,27 @@ pub fn get(connection: &Connection, key: &[u8; 32], now_ms: i64) -> rusqlite::Re
         .optional()
 }
 
+/// Per app: unexpired entries, their bytes and hits.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CacheStats {
+    pub app: String,
+    pub entries: i64,
+    pub bytes: i64,
+    pub hits: i64,
+}
+
+pub fn stats(connection: &Connection, now_ms: i64) -> rusqlite::Result<Vec<CacheStats>> {
+    let mut statement = connection.prepare(
+        "SELECT app, COUNT(*), COALESCE(SUM(size), 0), COALESCE(SUM(hits), 0) FROM cache_entries
+         WHERE expires_at > ?1 GROUP BY app ORDER BY app",
+    )?;
+    statement
+        .query_map([now_ms], |row| {
+            Ok(CacheStats { app: row.get(0)?, entries: row.get(1)?, bytes: row.get(2)?, hits: row.get(3)? })
+        })?
+        .collect()
+}
+
 pub fn list(connection: &Connection, app: Option<&str>, limit: usize, now_ms: i64) -> rusqlite::Result<Vec<CacheRow>> {
     let mut statement = connection.prepare(
         "SELECT key, app, path, stream, source, created_at, expires_at, size, hits, last_hit_at, answer

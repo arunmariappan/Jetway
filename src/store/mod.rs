@@ -17,7 +17,7 @@ use bytes::Bytes;
 use rusqlite::{Connection, OpenFlags, params};
 use tokio::sync::{mpsc, oneshot};
 
-pub use cache_rows::CacheRow;
+pub use cache_rows::{CacheRow, CacheStats};
 pub use row::{ExchangeRow, RollupRow};
 pub use schema::LATEST as SCHEMA_VERSION;
 
@@ -252,6 +252,10 @@ impl Store {
             }
             None => Ok(None),
         }
+    }
+
+    pub async fn cache_stats(&self, now_ms: i64) -> Result<Vec<CacheStats>, StoreError> {
+        self.read(move |c| cache_rows::stats(c, now_ms)).await
     }
 
     /// Unexpired entries, most hit first.

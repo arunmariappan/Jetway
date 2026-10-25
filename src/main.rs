@@ -37,6 +37,11 @@ enum Command {
         #[command(subcommand)]
         command: RequestsCommand,
     },
+    /// Look at or clear the exact cache's stored entries.
+    Cache {
+        #[command(subcommand)]
+        command: CacheCommand,
+    },
     /// Maintain the request log.
     Db {
         #[command(subcommand)]
@@ -71,6 +76,24 @@ enum RequestsCommand {
         /// Include the request and response bodies.
         #[arg(long)]
         bodies: bool,
+    },
+}
+
+#[derive(Subcommand)]
+enum CacheCommand {
+    /// Entries, bytes and hits per app.
+    Stats,
+    /// The most hit entries.
+    List {
+        #[arg(long)]
+        app: Option<String>,
+        #[arg(long, default_value_t = 20)]
+        limit: usize,
+    },
+    /// Delete stored entries (a running Jetway keeps what it holds in memory until it expires or restarts).
+    Clear {
+        #[arg(long)]
+        app: Option<String>,
     },
 }
 
@@ -115,6 +138,7 @@ fn run(cli: Cli) -> anyhow::Result<()> {
         Command::Serve => runtime()?.block_on(serve(config)),
         Command::Requests { command } => runtime()?.block_on(requests(config, command)),
         Command::Db { command } => runtime()?.block_on(db(config, command)),
+        Command::Cache { command } => runtime()?.block_on(cache(config, command)),
         Command::FakeOllama { .. } => unreachable!("handled above"),
     }
 }
@@ -221,6 +245,42 @@ async fn requests(config: Config, command: RequestsCommand) -> anyhow::Result<()
             Ok(())
         }
     }
+}
+
+async fn cache(config: Config, command: CacheCommand) -> anyhow::Result<()> {
+    let store = Store::open(&config.store.path)?;
+    let now = jiff::Timestamp::now().as_millisecond();
+    match command {
+        CacheCommand::Stats => {
+            let stats = store.cache_stats(now).await?;
+            if stats.is_empty() {
+                println!("no cache entries");
+            }
+            for s in stats {
+                println!("{:<16} {:>7} entries  {:>10} bytes  {:>7} hits", s.app, s.entries, s.bytes, s.hits);
+            }
+        }
+        CacheCommand::List { app, limit } => {
+            for row in store.cache_list(app, limit, now).await? {
+                let stream = if row.stream { "stream" } else { "whole" };
+                println!(
+                    "{}  {:<12} {:<22} {:<6} {:>5} hits  {:>8} bytes  {}",
+                    &row.key[..16],
+                    row.app,
+                    row.path,
+                    stream,
+                    row.hits,
+                    row.size,
+                    row.preview
+                );
+            }
+        }
+        CacheCommand::Clear { app } => {
+            let deleted = store.cache_clear(app).await?;
+            println!("deleted {deleted} cache entries");
+        }
+    }
+    Ok(())
 }
 
 async fn db(config: Config, command: DbCommand) -> anyhow::Result<()> {
