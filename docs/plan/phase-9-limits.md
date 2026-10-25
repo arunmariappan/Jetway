@@ -35,6 +35,9 @@ piling up, and a dead Ollama is reported at once instead of timing out request b
 ### 9.4 Upstream health
 - [ ] `GET /api/version` every 5 seconds. After 3 failed connects in a row the circuit opens: requests fail at once
       with 503 "Ollama is down" in the client's format; a probe every 5 seconds closes it again.
+- [ ] Why it matters on this PC (found in phase 1): Windows reports a refused loopback connection only after about
+      2 seconds of retries, so without the circuit every request to a stopped Ollama waits 2 s. Also try
+      `TCP_MAXRTMS` on the upstream socket to shorten those retries, and keep whichever works.
 - [ ] Cold starts: a `load_duration` over 1 second marks the exchange as a model load, shown on the dashboard.
 
 ### 9.5 Alerts

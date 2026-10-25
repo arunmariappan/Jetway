@@ -7,7 +7,7 @@ prompt injection and personal data, decides when the model's thinking mode is wo
 priorities, and shows it all on a live dashboard. One Rust binary; it speaks Ollama's API and the OpenAI-compatible
 API.
 
-> **Status:** in development. Phase 0 (bootstrap and spikes) is done; phase 1 (pass-through) is next. See the
+> **Status:** in development. Phases 0 (bootstrap) and 1 (streaming pass-through) are done; phase 2 (request log) is next. See the
 > [implementation plan](docs/plan/README.md).
 
 ## Building

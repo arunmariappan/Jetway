@@ -10,7 +10,7 @@ and shows all of it live on a dashboard.
 Jetway is one Rust binary. It speaks Ollama's own API and Ollama's OpenAI-compatible API, so it works with PaperPilot
 (.NET, OllamaSharp), BlackBox's OpsDesk agent (Python, `ollama`), the `ollama` CLI and any OpenAI client.
 
-> **Status (2026-10-25):** plan approved; phase 0 (bootstrap and spikes) done; phase 1 (pass-through) next.
+> **Status (2026-10-25):** plan approved; phases 0 (bootstrap) and 1 (pass-through) done; phase 2 (request log) next.
 
 | File | What it covers |
 |---|---|

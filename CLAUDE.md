@@ -4,8 +4,8 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Jetway is an LLM gateway in Rust between apps and the host Ollama: streaming pass-through for Ollama's API and the
 OpenAI-compatible API, exact and semantic caches, joined in-flight requests, personal-data and prompt-injection
-guards, thinking on/off routing for `qwen3.5:4b`, budgets, a priority queue and a live dashboard. **Phase 0 is
-done; phase 1 (pass-through) is next.** Read [docs/plan/README.md](docs/plan/README.md) and the current phase file before working; each phase
+guards, thinking on/off routing for `qwen3.5:4b`, budgets, a priority queue and a live dashboard. **Phases 0
+(bootstrap) and 1 (streaming pass-through) are done; phase 2 (request log) is next.** Read [docs/plan/README.md](docs/plan/README.md) and the current phase file before working; each phase
 file has tasks, tests and "done when" items to tick, and ends with a "What was built" section (with "Rust notes",
 plan D20) recording decisions and what is left. Keep the plan's status line and the README in step when a phase
 lands.
@@ -35,12 +35,23 @@ cargo test                                    # never needs Ollama, a GPU or a d
 cargo test config::tests::file_then_environment   # a single test
 cargo test -- --ignored                       # tests that need real models (later phases)
 cargo run -- check-config                     # merged configuration (defaults, jetway.toml, JETWAY__* env)
+cargo run -- serve                            # gateway on 127.0.0.1:8300 → upstream.url (JETWAY_LOG=debug for more)
+cargo run -- fake-ollama --port 8399          # fake upstream; JETWAY__UPSTREAM__URL=http://127.0.0.1:8399 to use it
+cargo bench --bench overhead                  # added latency per request and per chunk (release build)
+OLLAMA_HOST=127.0.0.1:8300 ollama run qwen3.5:4b "hi"   # the ollama CLI through Jetway (app "default")
 cargo deny check                              # licences, advisories, duplicates (cargo install cargo-deny)
 ```
 
 ## Layout
 
 - `src/main.rs`: the clap CLI. `src/lib.rs`: modules. `src/config.rs`: figment configuration with validation.
+- `src/server/`: the gateway handler (`mod.rs`), app identity (`identity.rs`: `/a/{app}/`, `X-Jetway-App`, bearer
+  key, `default`) and the path allow-list (`routes.rs`).
+- `src/proxy/`: `Upstream` (reqwest client), `headers` (what crosses), `errors` (bodies per protocol, stream error
+  lines), `tee` (`TeeBody`: forwards chunks, timeouts, cancellation), `record` (per-exchange recorder task, `Sink`,
+  `Finished`).
+- `src/protocol/`: `Protocol` (by path) and `Framing` (by content type). `src/dev/fake_ollama.rs`: the fake.
+- `tests/common/`: harness (fake + gateway in-process, `Collect` sink). `tests/pass_through.rs`: phase 1.
 - `jetway.toml`: committed defaults; a test checks it equals `Config::default()`, so change both together.
 - `docs/plan/`: the plan. Later phases add the modules listed in plan §3.
 
@@ -57,6 +68,14 @@ cargo deny check                              # licences, advisories, duplicates
   `#[allow(clippy::result_large_err)]`, because Jail fixes the closure's error type.
 - Microsoft Defender excludes `D:\ai_workspace\Jetway\target` (added 2026-10-25 at the user's request) for faster
   builds. Throwaway spike crates build with `CARGO_TARGET_DIR=D:/ai_workspace/Jetway/target/spikes` to benefit.
+- Every exchange must end in exactly one `Finished` record. hyper drops a response body without reading to the end
+  when it has sent the declared `Content-Length`, and never reads one for HEAD/204/304; the tee ends those as `ok`
+  itself (`expected_len`). A dropped body otherwise means the client left (`client_cancelled`).
+- Fake-Ollama scripts go in the `x-fake-script` request header (JSON); Jetway forwards it like any other header.
+- On Windows a refused loopback connection takes ~2 s (the OS retries), so "Ollama is down" is slow until phase 9's
+  circuit breaker; tests allow for it with `cfg!(windows)`.
+- Integration test files start with `#![allow(clippy::unwrap_used, clippy::expect_used)]`: `clippy.toml`'s test
+  allowance covers `#[test]` functions, not helpers.
 - Pushing needs the user's GitHub login for this repo's URL (`credential.usehttppath` is on globally, so BlackBox's
   saved login doesn't apply). Don't copy credentials between entries; ask the user to sign in once.
 
