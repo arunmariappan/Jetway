@@ -266,7 +266,8 @@ async fn serve_joined(
         Some(Start::Response { status, headers }) => {
             report.status = status.as_u16();
             report.framing = Framing::from_content_type(headers.get(CONTENT_TYPE).and_then(|v| v.to_str().ok()));
-            let mut response = Response::new(Body::from_stream(FlightBody::joined(reader, report)));
+            let expected_len = headers.get(CONTENT_LENGTH).and_then(|v| v.to_str().ok()?.parse().ok());
+            let mut response = Response::new(Body::from_stream(FlightBody::joined(reader, report, expected_len)));
             *response.status_mut() = status;
             *response.headers_mut() = headers;
             response

@@ -91,7 +91,10 @@ impl Stream for ServedBody {
             this.first.get_or_insert_with(|| report.exchange.started.elapsed());
         }
         this.bytes += piece.len() as u64;
-        if !this.pieces.is_empty() && !this.gap.is_zero() {
+        if this.pieces.is_empty() {
+            // Delivered: the server may never poll again (it stops after a declared Content-Length).
+            this.end(Outcome::Ok);
+        } else if !this.gap.is_zero() {
             this.sleep = Some(Box::pin(tokio::time::sleep(this.gap)));
         }
         Poll::Ready(Some(Ok(piece)))
@@ -111,16 +114,18 @@ pub struct FlightBody {
     report: Option<Report>,
     first: Option<Duration>,
     bytes: u64,
+    /// The response's `Content-Length`: the server stops reading once it has sent that much.
+    expected_len: Option<u64>,
     ended: bool,
 }
 
 impl FlightBody {
     pub fn leader(reader: Reader) -> Self {
-        Self { reader, report: None, first: None, bytes: 0, ended: false }
+        Self { reader, report: None, first: None, bytes: 0, expected_len: None, ended: false }
     }
 
-    pub fn joined(reader: Reader, report: Report) -> Self {
-        Self { reader, report: Some(report), first: None, bytes: 0, ended: false }
+    pub fn joined(reader: Reader, report: Report, expected_len: Option<u64>) -> Self {
+        Self { reader, report: Some(report), first: None, bytes: 0, expected_len, ended: false }
     }
 
     fn end(&mut self, outcome: Outcome, error: Option<String>) {
@@ -145,6 +150,9 @@ impl Stream for FlightBody {
                     this.first = this.report.as_ref().map(|r| r.exchange.started.elapsed());
                 }
                 this.bytes += chunk.len() as u64;
+                if this.expected_len.is_some_and(|len| this.bytes >= len) {
+                    this.end(Outcome::Ok, None);
+                }
                 Poll::Ready(Some(Ok(chunk)))
             }
             Poll::Ready(Some(Err(End::Complete))) | Poll::Ready(None) => {

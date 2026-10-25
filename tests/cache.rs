@@ -37,6 +37,12 @@ async fn a_repeated_request_is_answered_from_the_cache() {
     assert_eq!(stack.fake.events.requests().len(), 1, "the upstream saw one request");
     let records = stack.records.wait_for(2).await;
     assert_eq!((note(&records[0]), note(&records[1])), ("miss", "hit"));
+    // A hit counts as delivered once its last byte is handed over (found live with the ollama CLI).
+    assert!(
+        records.iter().all(|r| r.outcome == Outcome::Ok),
+        "{:?}",
+        records.iter().map(|r| r.outcome).collect::<Vec<_>>()
+    );
     let hit = records[1].exchange.cache.as_ref().unwrap();
     assert_eq!((hit.saved_prompt_tokens, hit.saved_completion_tokens), (Some(18), Some(10)));
     assert_eq!(hit.source.as_deref(), Some(records[0].exchange.id.to_string().as_str()));
@@ -351,4 +357,23 @@ async fn expired_entries_are_not_served_and_are_swept() {
     let left: i64 = store.read(|c| c.query_row("SELECT COUNT(*) FROM cache_entries", [], |r| r.get(0))).await.unwrap();
     assert_eq!(left, 1, "the expired entry was swept");
     assert_eq!(store.cache_clear(Some("pp".into())).await.unwrap(), 1);
+}
+
+#[tokio::test]
+async fn joined_unstreamed_requests_end_ok() {
+    let h = joining().await;
+    let (name, value) = script(r#"{"ttfb_ms":200}"#);
+    let a = tokio::spawn(h.post("/api/chat", chat(false)).header(name, value.clone()).send());
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    let b = h.post("/api/chat", chat(false)).header(name, value).send().await.unwrap();
+    assert_eq!(b.headers()["x-jetway-cache"], "joined");
+    let body: Value = b.json().await.unwrap();
+    assert_eq!(body["message"]["content"], "Hello there, friend! How are you?");
+    a.await.unwrap().unwrap().bytes().await.unwrap();
+    let records = h.records.wait_for(2).await;
+    assert!(
+        records.iter().all(|r| r.outcome == Outcome::Ok),
+        "{:?}",
+        records.iter().map(|r| r.outcome).collect::<Vec<_>>()
+    );
 }
