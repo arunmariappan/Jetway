@@ -14,6 +14,7 @@ use tokio::time::{Instant, Sleep};
 
 use super::errors;
 use super::record::{End, Outcome, Recorder, Timings};
+use super::usage::UsageFilter;
 use crate::protocol::{Framing, Protocol};
 
 /// Counts exchanges in flight; the count drops when the guard does.
@@ -48,6 +49,10 @@ pub struct TeeBody {
     /// The upstream's `Content-Length`, when it sent one: the server stops reading the body after that many bytes,
     /// so the exchange is complete then, not when the stream reports its end.
     expected_len: Option<u64>,
+    /// Set when Jetway asked for OpenAI usage that the client didn't (plan D21).
+    usage_filter: Option<UsageFilter>,
+    /// The upstream has ended; the next poll finishes the exchange.
+    upstream_done: bool,
     recorder: Option<Recorder>,
     _inflight: InflightGuard,
 }
@@ -61,6 +66,7 @@ pub struct TeeParts {
     pub framing: Framing,
     pub protocol: Protocol,
     pub expected_len: Option<u64>,
+    pub usage_filter: Option<UsageFilter>,
     pub recorder: Recorder,
     pub inflight: InflightGuard,
 }
@@ -80,6 +86,8 @@ impl TeeBody {
             tail_len: 0,
             bytes: 0,
             expected_len: parts.expected_len,
+            usage_filter: parts.usage_filter,
+            upstream_done: false,
             recorder: Some(parts.recorder),
             _inflight: parts.inflight,
         };
@@ -104,13 +112,14 @@ impl TeeBody {
     }
 
     fn forward(&mut self, chunk: &Bytes) {
+        let now = Instant::now();
         if self.timings.first_chunk.is_none() {
-            self.timings.first_chunk = Some(self.started.elapsed());
+            self.timings.first_chunk = Some(now.duration_since(self.started));
         }
         self.bytes += chunk.len() as u64;
         self.remember_tail(chunk);
         if let Some(recorder) = &mut self.recorder {
-            recorder.chunk(chunk);
+            recorder.sent(now, chunk);
         }
     }
 
@@ -123,7 +132,6 @@ impl TeeBody {
                 outcome,
                 error,
                 timings: self.timings,
-                framing: self.framing,
                 response_bytes: self.bytes,
             });
         }
@@ -149,32 +157,57 @@ impl Stream for TeeBody {
         if this.recorder.is_none() {
             return Poll::Ready(None);
         }
-        match this.upstream.as_mut().poll_next(cx) {
-            Poll::Ready(Some(Ok(chunk))) => {
-                this.forward(&chunk);
-                if this.expected_len.is_some_and(|len| this.bytes >= len) {
-                    this.finish(Outcome::Ok, None);
-                } else {
+        if this.upstream_done {
+            this.finish(Outcome::Ok, None);
+            return Poll::Ready(None);
+        }
+        loop {
+            match this.upstream.as_mut().poll_next(cx) {
+                Poll::Ready(Some(Ok(mut chunk))) => {
                     let deadline = Instant::now() + this.idle_timeout;
                     this.idle.as_mut().reset(deadline);
+                    if let Some(filter) = &mut this.usage_filter {
+                        let filtered = filter.push(chunk);
+                        if let Some(recorder) = &mut this.recorder {
+                            for event in filtered.hidden {
+                                recorder.hidden(event);
+                            }
+                        }
+                        if filtered.sent.is_empty() {
+                            continue;
+                        }
+                        chunk = filtered.sent;
+                    }
+                    this.forward(&chunk);
+                    if this.expected_len.is_some_and(|len| this.bytes >= len) {
+                        this.finish(Outcome::Ok, None);
+                    }
+                    return Poll::Ready(Some(Ok(chunk)));
                 }
-                Poll::Ready(Some(Ok(chunk)))
-            }
-            Poll::Ready(Some(Err(error))) => {
-                let message = format!("the upstream stream failed: {error}");
-                Poll::Ready(this.fail(Outcome::UpstreamError, message).map(Ok))
-            }
-            Poll::Ready(None) => {
-                this.finish(Outcome::Ok, None);
-                Poll::Ready(None)
-            }
-            Poll::Pending => match this.idle.as_mut().poll(cx) {
-                Poll::Ready(()) => {
-                    let message = format!("no data from the upstream for {} s", this.idle_timeout.as_secs());
-                    Poll::Ready(this.fail(Outcome::Timeout, message).map(Ok))
+                Poll::Ready(Some(Err(error))) => {
+                    let message = format!("the upstream stream failed: {error}");
+                    return Poll::Ready(this.fail(Outcome::UpstreamError, message).map(Ok));
                 }
-                Poll::Pending => Poll::Pending,
-            },
+                Poll::Ready(None) => {
+                    let rest = this.usage_filter.as_mut().map(UsageFilter::finish).unwrap_or_default();
+                    if rest.is_empty() {
+                        this.finish(Outcome::Ok, None);
+                        return Poll::Ready(None);
+                    }
+                    this.forward(&rest);
+                    this.upstream_done = true;
+                    return Poll::Ready(Some(Ok(rest)));
+                }
+                Poll::Pending => {
+                    return match this.idle.as_mut().poll(cx) {
+                        Poll::Ready(()) => {
+                            let message = format!("no data from the upstream for {} s", this.idle_timeout.as_secs());
+                            Poll::Ready(this.fail(Outcome::Timeout, message).map(Ok))
+                        }
+                        Poll::Pending => Poll::Pending,
+                    };
+                }
+            }
         }
     }
 }

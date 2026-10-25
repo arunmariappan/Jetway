@@ -50,7 +50,11 @@ async fn bodies_are_forwarded_byte_for_byte() {
         ("/api/chat", json!({"model": "qwen3.5:4b", "messages": [], "think": true})),
         ("/api/generate", json!({"model": "qwen3.5:4b", "prompt": "hi"})),
         ("/api/generate", json!({"model": "qwen3.5:4b", "prompt": "hi", "stream": false})),
-        ("/v1/chat/completions", json!({"model": "qwen3.5:4b", "messages": [], "stream": true})),
+        // A client that asks for usage gets the stream untouched (without asking, see `openai_usage_is_hidden`).
+        (
+            "/v1/chat/completions",
+            json!({"model": "qwen3.5:4b", "messages": [], "stream": true, "stream_options": {"include_usage": true}}),
+        ),
         ("/v1/chat/completions", json!({"model": "qwen3.5:4b", "messages": []})),
         ("/v1/completions", json!({"model": "qwen3.5:4b", "prompt": "hi", "stream": true})),
         ("/api/embed", json!({"model": "qwen3.5:4b", "input": ["a", "b"]})),
@@ -293,4 +297,47 @@ async fn shutdown_lets_an_in_flight_stream_finish() {
     let server = h.server.take().unwrap();
     tokio::time::timeout(Duration::from_secs(3), server).await.unwrap().unwrap().unwrap();
     assert_eq!(h.records.wait_for(1).await[0].outcome, Outcome::Ok);
+}
+
+#[tokio::test]
+async fn openai_usage_is_asked_for_and_hidden() {
+    let h = Harness::start().await;
+    let body = json!({"model": "qwen3.5:4b", "messages": [], "stream": true});
+    let text = h.post("/v1/chat/completions", body).send().await.unwrap().text().await.unwrap();
+    assert!(!text.contains("\"usage\""), "the client didn't ask for usage: {text}");
+    assert!(text.ends_with(
+        "data: [DONE]
+
+"
+    ));
+    let (_, _, _, _, sent) = h.fake.events.requests().pop().unwrap();
+    let sent: serde_json::Value = serde_json::from_slice(&sent).unwrap();
+    assert_eq!(sent["stream_options"]["include_usage"], true, "Jetway asked the upstream for usage");
+    let record = &h.records.wait_for(1).await[0];
+    assert_eq!((record.summary.prompt_tokens, record.summary.completion_tokens), (Some(18), Some(10)));
+    assert_eq!(record.response, text.as_bytes(), "the record holds what the client received");
+}
+
+#[tokio::test]
+async fn records_carry_summaries_and_token_timings() {
+    let h = Harness::start().await;
+    let (name, value) = script(r#"{"gap_ms":30}"#);
+    let mut body = chat(true);
+    body["options"] = json!({"temperature": 0.7, "seed": 3});
+    h.post("/a/pp/api/chat", body).header(name, value).send().await.unwrap().bytes().await.unwrap();
+    let record = &h.records.wait_for(1).await[0];
+    let request = record.exchange.summary.as_ref().unwrap();
+    assert_eq!(
+        (request.model.as_deref(), request.stream, request.temperature, request.seed),
+        (Some("qwen3.5:4b"), true, Some(0.7), Some(3))
+    );
+    assert_eq!(record.summary.content, "Hello there, friend! How are you?");
+    assert_eq!((record.summary.prompt_tokens, record.summary.completion_tokens), (Some(18), Some(10)));
+    let t = record.timings;
+    let (first_chunk, first_token, done) = (t.first_chunk.unwrap(), t.first_token.unwrap(), t.done.unwrap());
+    assert!(first_chunk <= first_token && first_token < done, "{t:?}");
+    assert!(
+        done - first_token >= std::time::Duration::from_millis(250),
+        "nine gaps of 30 ms after the first token: {t:?}"
+    );
 }

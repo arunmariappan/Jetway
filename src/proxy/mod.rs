@@ -5,6 +5,7 @@ pub mod errors;
 pub mod headers;
 pub mod record;
 pub mod tee;
+pub mod usage;
 
 use std::time::Duration;
 

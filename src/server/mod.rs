@@ -25,9 +25,11 @@ use tokio::time::Instant;
 use ulid::Ulid;
 
 use crate::config::Config;
+use crate::protocol::summary::RequestSummary;
 use crate::protocol::{Framing, Protocol};
 use crate::proxy::record::{Exchange, Outcome, Recorder, Sink, Timings, finish_without_response};
 use crate::proxy::tee::{InflightGuard, TeeBody, TeeParts};
+use crate::proxy::usage::{self, UsageFilter};
 use crate::proxy::{Upstream, errors, headers};
 use identity::{DEFAULT_APP, KeyMap, identify};
 use routes::{PathClass, classify};
@@ -169,6 +171,7 @@ async fn handle(State(gateway): State<Arc<Gateway>>, request: Request) -> Respon
         started,
         started_at: jiff::Timestamp::now(),
         request: Bytes::new(),
+        summary: None,
         traceparent,
     };
     let mut timings = Timings::default();
@@ -205,13 +208,28 @@ async fn handle(State(gateway): State<Arc<Gateway>>, request: Request) -> Respon
         }
     };
     exchange.request = request_body.clone();
+    if matches!(class, PathClass::Generation | PathClass::Embedding) {
+        exchange.summary = RequestSummary::parse(protocol, &request_body);
+    }
+
+    // Exact token counts for OpenAI streams: ask for usage the client didn't, and hide it again (plan D21).
+    let mut upstream_body = request_body;
+    let mut usage_filter = None;
+    if protocol == Protocol::OpenAi
+        && class == PathClass::Generation
+        && exchange.summary.as_ref().is_some_and(|s| s.stream && !s.include_usage)
+        && let Some(body) = usage::ask_for_usage(&upstream_body)
+    {
+        upstream_body = body;
+        usage_filter = Some(UsageFilter::default());
+    }
 
     let upstream = &gateway.upstream;
     let send = upstream
         .client
         .request(parts.method.clone(), upstream.url_for(&path_and_query))
         .headers(headers::to_upstream(&parts.headers))
-        .body(request_body)
+        .body(upstream_body)
         .send();
     timings.upstream_sent = Some(started.elapsed());
     let response = match tokio::time::timeout(upstream.first_byte_timeout, send).await {
@@ -253,7 +271,9 @@ async fn handle(State(gateway): State<Arc<Gateway>>, request: Request) -> Respon
         framing,
         protocol,
         expected_len,
-        recorder: Recorder::spawn(exchange, Arc::clone(&gateway.sink)),
+        // Only an event stream can carry the usage event.
+        usage_filter: usage_filter.filter(|_| framing == Framing::Sse),
+        recorder: Recorder::spawn(exchange, framing, Arc::clone(&gateway.sink)),
         inflight,
     });
 
