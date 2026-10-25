@@ -1,6 +1,9 @@
 //! The two APIs Jetway speaks: Ollama's own and Ollama's OpenAI-compatible one (plan D4). Jetway never translates
 //! between them; it only needs to know which one a request uses and how its responses are framed.
 
+pub mod decode;
+pub mod summary;
+
 /// Which API a request uses. OpenAI-compatible paths start with `/v1/`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Protocol {
