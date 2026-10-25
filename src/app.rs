@@ -7,7 +7,6 @@ use std::time::Duration;
 
 use tokio::net::TcpListener;
 use tokio::task::JoinHandle;
-use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 
 use crate::config::Config;
@@ -18,6 +17,7 @@ use crate::server::{self, Gateway};
 use crate::store::sink::RequestLog;
 use crate::store::{Store, StoreError};
 use crate::telemetry::Telemetry;
+use crate::web::feed::Feed;
 
 const ROLLUP_EVERY: Duration = Duration::from_secs(15);
 const PRUNE_EVERY: Duration = Duration::from_secs(3600);
@@ -59,20 +59,24 @@ pub async fn start(
     let admin_addr = admin_listener.local_addr()?;
     let store = Arc::new(Store::open(&config.store.path)?);
     let metrics = Arc::new(Metrics::default());
+    // The dashboard's charts cover a day; bring back the minutes written before a restart.
+    match store.rollups_since(now_ms() - DAY_MS).await {
+        Ok(rows) => metrics.restore(rows, now_ms()),
+        Err(error) => tracing::warn!(%error, "couldn't restore the last day's rollups"),
+    }
 
-    let mut sinks: Vec<Arc<dyn Sink>> =
-        vec![Arc::clone(&metrics) as Arc<dyn Sink>, Arc::new(RequestLog::new(Arc::clone(&store), config.store.bodies))];
+    let feed = Feed::default();
+    let mut sinks: Vec<Arc<dyn Sink>> = vec![
+        Arc::clone(&metrics) as Arc<dyn Sink>,
+        Arc::new(RequestLog::new(Arc::clone(&store), config.store.bodies)),
+        Arc::new(feed.clone()),
+    ];
     if !config.otel.endpoint.is_empty() {
         sinks.push(Arc::new(Telemetry::start(&config.otel.endpoint, &config.otel.service_name, &config.upstream.url)));
     }
     sinks.extend(extra);
     let gateway = Gateway::new(config.clone(), Arc::new(Sinks(sinks)), Some(Arc::clone(&store)))?;
-    let admin = Arc::new(Admin {
-        gateway: Arc::clone(&gateway),
-        metrics: Arc::clone(&metrics),
-        store: Some(Arc::clone(&store)),
-        started: Instant::now(),
-    });
+    let admin = Arc::new(Admin::new(Arc::clone(&gateway), Arc::clone(&metrics), Some(Arc::clone(&store)), feed));
 
     let token = CancellationToken::new();
     let servers = vec![

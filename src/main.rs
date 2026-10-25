@@ -47,6 +47,27 @@ enum Command {
         #[command(subcommand)]
         command: DbCommand,
     },
+    /// Send traffic at a fixed rate (demos, dashboard work; phase 10 adds load-test measurements).
+    Load {
+        /// Jetway's gateway URL.
+        #[arg(long, default_value = "http://127.0.0.1:8300")]
+        target: String,
+        /// Requests per second.
+        #[arg(long, default_value_t = 5.0)]
+        rate: f64,
+        /// Seconds to run.
+        #[arg(long, default_value_t = 60)]
+        duration: u64,
+        /// Apps to spread the requests over, comma-separated.
+        #[arg(long, default_value = "demo-chat,demo-agent,demo-batch", value_delimiter = ',')]
+        apps: Vec<String>,
+        /// Share of requests that repeat an earlier question (0-1).
+        #[arg(long, default_value_t = 0.3)]
+        repeat: f64,
+        /// Add fake-Ollama scripts: realistic timings and a few errors and drops.
+        #[arg(long)]
+        fake: bool,
+    },
     /// Run a fake Ollama that answers from recorded responses (for development and load tests).
     FakeOllama {
         #[arg(long, default_value_t = 8399)]
@@ -127,6 +148,17 @@ fn run(cli: Cli) -> anyhow::Result<()> {
     if let Command::FakeOllama { port, script } = &cli.command {
         return runtime()?.block_on(fake(*port, script.as_deref()));
     }
+    if let Command::Load { target, rate, duration, apps, repeat, fake } = &cli.command {
+        let options = jetway::dev::load::LoadOptions {
+            target: target.clone(),
+            rate: *rate,
+            duration: Duration::from_secs(*duration),
+            apps: apps.clone(),
+            repeat: *repeat,
+            fake: *fake,
+        };
+        return runtime()?.block_on(load(options));
+    }
     // The default file may be absent (built-in defaults apply); a file named on the command line must exist.
     let required = cli.config.as_os_str() != DEFAULT_CONFIG;
     let config = Config::load(&cli.config, required)?;
@@ -139,7 +171,7 @@ fn run(cli: Cli) -> anyhow::Result<()> {
         Command::Requests { command } => runtime()?.block_on(requests(config, command)),
         Command::Db { command } => runtime()?.block_on(db(config, command)),
         Command::Cache { command } => runtime()?.block_on(cache(config, command)),
-        Command::FakeOllama { .. } => unreachable!("handled above"),
+        Command::FakeOllama { .. } | Command::Load { .. } => unreachable!("handled above"),
     }
 }
 
@@ -209,7 +241,7 @@ async fn requests(config: Config, command: RequestsCommand) -> anyhow::Result<()
     let store = Store::open(&config.store.path)?;
     match command {
         RequestsCommand::Tail { app, outcome, limit, follow } => {
-            let mut filter = ListFilter { app, outcome, after: None, limit };
+            let mut filter = ListFilter { app, outcome, after: None, before: None, limit };
             loop {
                 let rows = store.list(filter.clone()).await?;
                 for row in &rows {
@@ -296,6 +328,16 @@ async fn db(config: Config, command: DbCommand) -> anyhow::Result<()> {
             println!("deleted {exchanges} exchanges older than {older_than} days");
         }
     }
+    Ok(())
+}
+
+async fn load(options: jetway::dev::load::LoadOptions) -> anyhow::Result<()> {
+    println!("sending {} requests per second to {} for {} s", options.rate, options.target, options.duration.as_secs());
+    let report = jetway::dev::load::run(options).await;
+    let pct =
+        |p: f64| report.totals.get(((report.totals.len().max(1) - 1) as f64 * p) as usize).copied().unwrap_or_default();
+    println!("sent {}, statuses {:?}, failed {}", report.sent, report.statuses, report.failed);
+    println!("total time p50 {:?}, p95 {:?}", pct(0.5), pct(0.95));
     Ok(())
 }
 

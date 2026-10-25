@@ -2,7 +2,7 @@
 
 use rusqlite::Connection;
 
-const MIGRATIONS: &[&str] = &[V1, V2];
+const MIGRATIONS: &[&str] = &[V1, V2, V3];
 
 /// The schema version a fully migrated database has.
 pub const LATEST: usize = MIGRATIONS.len();
@@ -116,6 +116,11 @@ ALTER TABLE rollups_minute ADD COLUMN cache_hits INTEGER NOT NULL DEFAULT 0;
 ALTER TABLE rollups_minute ADD COLUMN cache_joined INTEGER NOT NULL DEFAULT 0;
 ALTER TABLE rollups_minute ADD COLUMN saved_tokens INTEGER NOT NULL DEFAULT 0;
 ALTER TABLE rollups_minute ADD COLUMN saved_gpu_ms INTEGER NOT NULL DEFAULT 0;
+";
+
+/// Phase 4: the cacheable count, so restored rollups give the dashboard its cache hit rate.
+const V3: &str = r"
+ALTER TABLE rollups_minute ADD COLUMN cacheable INTEGER NOT NULL DEFAULT 0;
 ";
 
 pub fn version(connection: &Connection) -> rusqlite::Result<usize> {

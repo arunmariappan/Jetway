@@ -8,7 +8,7 @@ use std::sync::{Mutex, PoisonError};
 use std::time::Duration;
 
 use hdrhistogram::Histogram;
-use hdrhistogram::serialization::{Serializer, V2Serializer};
+use hdrhistogram::serialization::{Deserializer, Serializer, V2Serializer};
 
 use crate::cache::CacheResult;
 use crate::proxy::record::{Finished, Outcome};
@@ -36,6 +36,8 @@ pub struct Minute {
     pub outcomes: [u64; 5],
     pub prompt_tokens: u64,
     pub completion_tokens: u64,
+    /// Generation and embedding requests, the ones the cache looks at (in memory only, for the dashboard).
+    pub cacheable: u64,
     pub cache_hits: u64,
     pub cache_joined: u64,
     /// Tokens and GPU time that hits saved.
@@ -56,6 +58,7 @@ impl Default for Minute {
             outcomes: [0; 5],
             prompt_tokens: 0,
             completion_tokens: 0,
+            cacheable: 0,
             cache_hits: 0,
             cache_joined: 0,
             saved_tokens: 0,
@@ -80,6 +83,7 @@ impl Minute {
         }
         self.prompt_tokens += other.prompt_tokens;
         self.completion_tokens += other.completion_tokens;
+        self.cacheable += other.cacheable;
         self.cache_hits += other.cache_hits;
         self.cache_joined += other.cache_joined;
         self.saved_tokens += other.saved_tokens;
@@ -197,6 +201,7 @@ impl Metrics {
         entry.outcomes[outcome_index(f.outcome)] += 1;
         entry.prompt_tokens += prompt;
         entry.completion_tokens += completion;
+        entry.cacheable += u64::from(cache_result.is_some());
         entry.cache_hits += u64::from(cache_result == Some(CacheResult::Hit));
         entry.cache_joined += u64::from(cache_result == Some(CacheResult::Joined));
         entry.saved_tokens += saved_tokens;
@@ -251,6 +256,64 @@ impl Metrics {
             }
         }
         merged
+    }
+
+    /// The apps seen in `[from_ms, to_ms)`, sorted.
+    pub fn apps(&self, from_ms: i64, to_ms: i64) -> Vec<String> {
+        let state = self.lock();
+        let mut apps: Vec<String> = state
+            .minutes
+            .range((from_ms, String::new(), String::new())..)
+            .take_while(|((minute, _, _), _)| *minute < to_ms)
+            .map(|((_, app, _), _)| app.clone())
+            .collect();
+        apps.sort();
+        apps.dedup();
+        apps
+    }
+
+    /// Puts stored rollups back into memory (at startup, so the dashboard keeps its history across restarts). Minutes
+    /// already in memory are left alone; restored minutes count as written.
+    pub fn restore(&self, rows: Vec<RollupRow>, now_ms: i64) {
+        let current = now_ms - now_ms.rem_euclid(MINUTE_MS);
+        let oldest = current - KEEP_MINUTES * MINUTE_MS;
+        let mut state = self.lock();
+        let read =
+            |bytes: &[u8]| Deserializer::new().deserialize::<u64, _>(&mut &bytes[..]).unwrap_or_else(|_| histogram());
+        let count = |n: i64| u64::try_from(n).unwrap_or(0);
+        for r in rows.into_iter().filter(|r| r.minute_ms >= oldest && r.minute_ms < current) {
+            let key = (r.minute_ms, r.app.clone(), r.model.clone());
+            if state.minutes.contains_key(&key) {
+                continue;
+            }
+            let mut outcomes = [0; 5];
+            for (outcome, n) in [
+                (Outcome::Ok, r.ok),
+                (Outcome::UpstreamError, r.upstream_errors),
+                (Outcome::ClientCancelled, r.cancelled),
+                (Outcome::Timeout, r.timeouts),
+                (Outcome::Rejected, r.rejected),
+            ] {
+                outcomes[outcome_index(outcome)] = count(n);
+            }
+            let minute = Minute {
+                requests: count(r.requests),
+                outcomes,
+                prompt_tokens: count(r.prompt_tokens),
+                completion_tokens: count(r.completion_tokens),
+                cacheable: count(r.cacheable),
+                cache_hits: count(r.cache_hits),
+                cache_joined: count(r.cache_joined),
+                saved_tokens: count(r.saved_tokens),
+                saved_gpu_ms: count(r.saved_gpu_ms),
+                latency: read(&r.latency),
+                ttft: read(&r.ttft),
+                added: read(&r.added),
+                tokens_per_second: read(&r.tokens_per_second),
+            };
+            state.minutes.insert(key, minute);
+        }
+        state.flushed_until = state.flushed_until.max(current);
     }
 
     /// Rollup rows for minutes that have closed since the last call (and any that late exchanges changed), and
@@ -390,6 +453,7 @@ fn to_row(minute: i64, app: &str, model: &str, m: &Minute) -> RollupRow {
         rejected: int(m.count(Outcome::Rejected)),
         prompt_tokens: int(m.prompt_tokens),
         completion_tokens: int(m.completion_tokens),
+        cacheable: int(m.cacheable),
         cache_hits: int(m.cache_hits),
         cache_joined: int(m.cache_joined),
         saved_tokens: int(m.saved_tokens),
@@ -498,6 +562,27 @@ mod tests {
         metrics.observe(&finished(61_000, "a", Outcome::Ok, 100, None));
         let rows = metrics.take_closed(185_000);
         assert_eq!(rows.iter().map(|r| (r.minute_ms, r.requests)).collect::<Vec<_>>(), [(60_000, 2), (120_000, 1)]);
+    }
+
+    #[test]
+    fn restored_rollups_match_what_was_written() {
+        let before = Metrics::default();
+        before.observe(&finished(60_000, "a", Outcome::Ok, 120, Some(500_000_000)));
+        before.observe(&finished(61_000, "a", Outcome::Timeout, 900, None));
+        let rows = before.take_closed(130_000);
+
+        let after = Metrics::default();
+        after.restore(rows.clone(), 130_000);
+        let restored = after.minutes(0, i64::MAX, Some("a"));
+        let original = before.minutes(0, i64::MAX, Some("a"));
+        let (r, o) = (&restored[&60_000], &original[&60_000]);
+        assert_eq!((r.requests, r.count(Outcome::Timeout), r.completion_tokens), (o.requests, 1, o.completion_tokens));
+        assert_eq!(r.latency.value_at_quantile(0.99), o.latency.value_at_quantile(0.99));
+        // Restored minutes count as written, and minutes older than a day are skipped.
+        assert!(after.take_closed(130_000).is_empty());
+        let old = Metrics::default();
+        old.restore(rows, 130_000 + 2 * 24 * 3_600_000);
+        assert!(old.minutes(0, i64::MAX, None).is_empty());
     }
 
     #[test]

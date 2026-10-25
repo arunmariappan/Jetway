@@ -1,0 +1,26 @@
+{% extends "base.html" %}
+{% block content %}
+<h1>{{ r.method }} {{ r.path }}</h1>
+<p class="sub">{{ r.time }} · {{ r.app }} · <span class="badge {{ r.outcome_class }}">{{ r.outcome }}</span> · status {{ r.status }} · {{ id }}</p>
+<div class="grid2">
+  <section class="card">
+    <h2>Request and response</h2>
+    <dl class="fields">
+      {% for f in fields %}<dt>{{ f.0 }}</dt><dd>{{ f.1 }}</dd>{% endfor %}
+    </dl>
+  </section>
+  <section class="card">
+    <h2>Timing</h2>
+    <p class="sub">Offsets from when Jetway received the request.</p>
+    {{ timeline|safe }}
+    <dl class="fields" style="margin-top:12px">
+      {% for f in timings %}<dt>{{ f.0 }}</dt><dd>{{ f.1 }}</dd>{% endfor %}
+    </dl>
+    {% if !cache.is_empty() %}<h2 style="margin-top:16px">Cache</h2><dl class="fields">{% for f in cache %}<dt>{{ f.0 }}</dt><dd>{% if f.0 == "Source" %}<a href="/exchanges/{{ f.1 }}">{{ f.1 }}</a>{% else %}{{ f.1 }}{% endif %}</dd>{% endfor %}</dl>{% endif %}
+  </section>
+</div>
+<div class="stack">
+  <section class="card"><details {% if request_open %}open{% endif %}><summary><h2 style="display:inline">Request body</h2> <span class="sub">{{ request_note }}</span></summary><pre class="body">{{ request }}</pre></details></section>
+  <section class="card"><details><summary><h2 style="display:inline">Response body</h2> <span class="sub">{{ response_note }}</span></summary><pre class="body">{{ response }}</pre></details></section>
+</div>
+{% endblock %}

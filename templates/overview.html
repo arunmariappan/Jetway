@@ -1,0 +1,21 @@
+{% extends "base.html" %}
+{% block content %}
+<h1>{{ heading }}</h1>
+<div class="filters">
+  <div class="segmented" role="group" aria-label="Time window">
+    {% for w in windows %}<a href="{{ w.href }}" {% if w.current %}class="current" aria-current="true"{% endif %}>{{ w.label }}</a>{% endfor %}
+  </div>
+  <form action="/" method="get">
+    <input type="hidden" name="window" value="{{ window }}">
+    <label class="sub" for="app">App</label>
+    <select id="app" name="app" hx-get="/" hx-trigger="change" hx-target="body" hx-push-url="true" hx-include="closest form">
+      <option value="" {% if app.is_empty() %}selected{% endif %}>All apps</option>
+      {% for a in apps %}<option value="{{ a.name }}" {% if a.selected %}selected{% endif %}>{{ a.name }}</option>{% endfor %}
+    </select>
+    <noscript><button type="submit">Show</button></noscript>
+  </form>
+</div>
+<div hx-get="{{ fragment }}" hx-trigger="every 5s" hx-swap="innerHTML">
+{{ body|safe }}
+</div>
+{% endblock %}

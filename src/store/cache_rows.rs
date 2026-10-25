@@ -7,7 +7,7 @@ use crate::cache::Entry;
 use crate::cache::answer::Answer;
 
 /// One cache entry as listed (`jetway cache list`, the dashboard).
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
 pub struct CacheRow {
     pub key: String,
     pub app: String,
@@ -74,7 +74,7 @@ pub fn get(connection: &Connection, key: &[u8; 32], now_ms: i64) -> rusqlite::Re
 }
 
 /// Per app: unexpired entries, their bytes and hits.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct CacheStats {
     pub app: String,
     pub entries: i64,

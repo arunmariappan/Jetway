@@ -2,8 +2,6 @@
 //! copy to the recorder, and ends the stream cleanly when the upstream fails, falls silent or the client leaves.
 
 use std::pin::Pin;
-use std::sync::Arc;
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::task::{Context, Poll};
 use std::time::Duration;
 
@@ -13,25 +11,10 @@ use futures::stream::BoxStream;
 use tokio::time::{Instant, Sleep};
 
 use super::errors;
+use super::inflight::InflightGuard;
 use super::record::{End, Outcome, Recorder, Timings};
 use super::usage::UsageFilter;
 use crate::protocol::{Framing, Protocol};
-
-/// Counts exchanges in flight; the count drops when the guard does.
-pub struct InflightGuard(Arc<AtomicUsize>);
-
-impl InflightGuard {
-    pub fn new(counter: &Arc<AtomicUsize>) -> Self {
-        counter.fetch_add(1, Ordering::Relaxed);
-        Self(Arc::clone(counter))
-    }
-}
-
-impl Drop for InflightGuard {
-    fn drop(&mut self) {
-        self.0.fetch_sub(1, Ordering::Relaxed);
-    }
-}
 
 pub struct TeeBody {
     upstream: BoxStream<'static, reqwest::Result<Bytes>>,

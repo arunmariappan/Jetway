@@ -65,6 +65,8 @@ pub struct ListFilter {
     pub outcome: Option<String>,
     /// Only exchanges after this id (ULIDs sort by time), oldest first; without it, the latest, oldest first.
     pub after: Option<String>,
+    /// Only exchanges before this id: the page before it, oldest first. Takes precedence over `after`.
+    pub before: Option<String>,
     pub limit: usize,
 }
 

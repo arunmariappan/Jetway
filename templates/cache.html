@@ -1,0 +1,26 @@
+{% extends "base.html" %}
+{% block content %}
+<h1>Cache</h1>
+<p class="sub">Entries live in memory and in the request log's database; clearing removes them from both.</p>
+<div class="tiles">
+{% for t in tiles %}<div class="card tile"><div class="label">{{ t.label }}</div><div class="value">{{ t.value }}</div>{% if !t.note.is_empty() %}<div class="note">{{ t.note }}</div>{% endif %}</div>
+{% endfor %}</div>
+<div class="stack">
+<section class="card">
+  <h2>Stored entries by app</h2>
+  {% if stats.is_empty() %}<p class="empty">No entries yet.</p>{% else %}
+  <table class="data"><thead><tr><th>App</th><th class="num">Entries</th><th class="num">Bytes</th><th class="num">Hits</th><th></th></tr></thead>
+  <tbody>{% for s in stats %}<tr><td>{{ s.app }}</td><td class="num">{{ s.entries }}</td><td class="num">{{ s.bytes }}</td><td class="num">{{ s.hits }}</td>
+  <td><form method="post" action="/cache/clear" hx-post="/cache/clear" hx-confirm="Clear every cache entry of {{ s.app }}?"><input type="hidden" name="app" value="{{ s.app }}"><button class="danger" type="submit">Clear</button></form></td></tr>{% endfor %}</tbody></table>
+  <form method="post" action="/cache/clear" hx-post="/cache/clear" hx-confirm="Clear the whole cache?" style="margin-top:12px"><button class="danger" type="submit">Clear everything</button></form>
+  {% endif %}
+</section>
+<section class="card">
+  <h2>Most hit entries</h2>
+  {% if top.is_empty() %}<p class="empty">No entries yet.</p>{% else %}
+  <div class="scroll"><table class="data"><thead><tr><th>App</th><th>Path</th><th>Form</th><th class="num">Hits</th><th class="num">Bytes</th><th>Answer</th><th>Source</th></tr></thead>
+  <tbody>{% for e in top %}<tr><td>{{ e.app }}</td><td>{{ e.path }}</td><td>{{ e.form }}</td><td class="num">{{ e.hits }}</td><td class="num">{{ e.size }}</td><td class="wrap">{{ e.preview }}</td><td><a href="/exchanges/{{ e.source }}">open</a></td></tr>{% endfor %}</tbody></table></div>
+  {% endif %}
+</section>
+</div>
+{% endblock %}

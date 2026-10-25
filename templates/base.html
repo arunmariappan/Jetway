@@ -1,0 +1,26 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{{ title }} · Jetway</title>
+<link rel="stylesheet" href="/assets/jetway.css">
+<script src="/assets/vendor/htmx.min.js"></script>
+<script src="/assets/vendor/htmx-ext-sse.js"></script>
+</head>
+<body>
+<header>
+  <a class="brand" href="/">Jetway</a>
+  <nav>
+    <a href="/" {% if nav == "overview" %}class="current"{% endif %}>Overview</a>
+    <a href="/live" {% if nav == "live" %}class="current"{% endif %}>Live</a>
+    <a href="/apps" {% if nav == "apps" %}class="current"{% endif %}>Apps</a>
+    <a href="/cache" {% if nav == "cache" %}class="current"{% endif %}>Cache</a>
+  </nav>
+  <div class="status" hx-get="/fragments/status" hx-trigger="load, every 10s"></div>
+</header>
+<main>
+{% block content %}{% endblock %}
+</main>
+</body>
+</html>

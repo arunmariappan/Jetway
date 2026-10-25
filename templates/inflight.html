@@ -1,0 +1,4 @@
+{% if entries.is_empty() %}<p class="empty">Nothing in progress.</p>{% else %}
+<table class="data"><thead><tr><th>Started</th><th>App</th><th>Request</th><th class="num">Elapsed</th></tr></thead>
+<tbody>{% for e in entries %}<tr><td>{{ e.time }}</td><td>{{ e.app }}</td><td>{{ e.method }} {{ e.path }}</td><td class="num">{{ e.elapsed }}</td></tr>{% endfor %}</tbody></table>
+{% endif %}

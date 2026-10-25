@@ -1,0 +1,20 @@
+{% extends "base.html" %}
+{% block content %}
+<h1>Live</h1>
+<p class="sub">Exchanges as they finish, newest first{% if !app.is_empty() %}, for {{ app }}{% endif %}. Reload to start over.</p>
+<div class="stack">
+<section class="card">
+  <h2>In progress</h2>
+  <div hx-get="/fragments/inflight" hx-trigger="load, every 1s">{{ inflight|safe }}</div>
+</section>
+<section class="card" hx-ext="sse" sse-connect="{{ events }}">
+  <h2>Finished</h2>
+  <div class="scroll" style="max-height:none">
+  <table class="data">
+    <thead><tr><th>Time</th><th>App</th><th>Request</th><th class="num">Status</th><th>Outcome</th><th>Cache</th><th class="num">First token</th><th class="num">Total</th><th class="num">Tokens in / out</th></tr></thead>
+    <tbody sse-swap="exchange" hx-swap="afterbegin">{% for r in rows %}{{ r|safe }}{% endfor %}</tbody>
+  </table>
+  </div>
+</section>
+</div>
+{% endblock %}

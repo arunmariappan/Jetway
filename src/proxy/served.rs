@@ -11,8 +11,8 @@ use bytes::Bytes;
 use futures::Stream;
 use tokio::time::{Instant, Sleep};
 
+use super::inflight::InflightGuard;
 use super::record::{Exchange, Finished, Outcome, Sink, Timings};
-use super::tee::InflightGuard;
 use crate::cache::flight::{End, Reader};
 use crate::protocol::Framing;
 use crate::protocol::summary::ResponseSummary;

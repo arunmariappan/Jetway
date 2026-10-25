@@ -8,7 +8,7 @@ use super::ListFilter;
 use crate::proxy::record::Finished;
 
 /// One exchange as stored (plan phase 2.2).
-#[derive(Debug, Clone, Default, PartialEq)]
+#[derive(Debug, Clone, Default, PartialEq, serde::Serialize)]
 pub struct ExchangeRow {
     pub id: String,
     pub started_at_ms: i64,
@@ -242,7 +242,18 @@ fn from_row(row: &Row<'_>) -> rusqlite::Result<ExchangeRow> {
 
 pub fn list(connection: &Connection, filter: &ListFilter) -> rusqlite::Result<Vec<ExchangeRow>> {
     let limit = i64::try_from(filter.limit.clamp(1, 10_000)).unwrap_or(100);
-    let mut rows = if let Some(after) = &filter.after {
+    let mut rows = if let Some(before) = &filter.before {
+        let sql = format!(
+            "SELECT {COLUMNS} FROM exchanges WHERE id < ?1 AND (?2 IS NULL OR app = ?2) AND (?3 IS NULL OR outcome = ?3)
+             ORDER BY id DESC LIMIT ?4"
+        );
+        let mut statement = connection.prepare(&sql)?;
+        let mut rows = statement
+            .query_map(params![before, filter.app, filter.outcome, limit], from_row)?
+            .collect::<Result<Vec<_>, _>>()?;
+        rows.reverse();
+        rows
+    } else if let Some(after) = &filter.after {
         let sql = format!(
             "SELECT {COLUMNS} FROM exchanges WHERE id > ?1 AND (?2 IS NULL OR app = ?2) AND (?3 IS NULL OR outcome = ?3)
              ORDER BY id LIMIT ?4"
@@ -293,6 +304,7 @@ pub struct RollupRow {
     pub rejected: i64,
     pub prompt_tokens: i64,
     pub completion_tokens: i64,
+    pub cacheable: i64,
     pub cache_hits: i64,
     pub cache_joined: i64,
     pub saved_tokens: i64,
@@ -307,8 +319,8 @@ pub fn upsert_rollup(connection: &Connection, r: &RollupRow) -> rusqlite::Result
     connection.execute(
         "INSERT OR REPLACE INTO rollups_minute (minute, app, model, requests, ok, upstream_errors, cancelled, timeouts,
          rejected, prompt_tokens, completion_tokens, latency, ttft, added, tokens_per_second, cache_hits,
-         cache_joined, saved_tokens, saved_gpu_ms)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19)",
+         cache_joined, saved_tokens, saved_gpu_ms, cacheable)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20)",
         params![
             r.minute_ms,
             r.app,
@@ -328,7 +340,8 @@ pub fn upsert_rollup(connection: &Connection, r: &RollupRow) -> rusqlite::Result
             r.cache_hits,
             r.cache_joined,
             r.saved_tokens,
-            r.saved_gpu_ms
+            r.saved_gpu_ms,
+            r.cacheable
         ],
     )?;
     Ok(())
@@ -338,7 +351,7 @@ pub fn rollups_since(connection: &Connection, since_ms: i64) -> rusqlite::Result
     let mut statement = connection.prepare(
         "SELECT minute, app, model, requests, ok, upstream_errors, cancelled, timeouts, rejected, prompt_tokens,
          completion_tokens, latency, ttft, added, tokens_per_second, cache_hits, cache_joined, saved_tokens,
-         saved_gpu_ms FROM rollups_minute WHERE minute >= ?1 ORDER BY minute",
+         saved_gpu_ms, cacheable FROM rollups_minute WHERE minute >= ?1 ORDER BY minute",
     )?;
     statement
         .query_map([since_ms], |row| {
@@ -362,6 +375,7 @@ pub fn rollups_since(connection: &Connection, since_ms: i64) -> rusqlite::Result
                 cache_joined: row.get(16)?,
                 saved_tokens: row.get(17)?,
                 saved_gpu_ms: row.get(18)?,
+                cacheable: row.get(19)?,
             })
         })?
         .collect()

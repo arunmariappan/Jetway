@@ -8,7 +8,6 @@ pub mod routes;
 use std::future::Future;
 use std::net::SocketAddr;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 use axum::Router;
@@ -31,9 +30,10 @@ use crate::cache::{CACHE_HEADER, Cache, CacheKey, hit_note, joined_note};
 use crate::config::{Config, Replay};
 use crate::protocol::summary::RequestSummary;
 use crate::protocol::{Framing, Protocol};
+use crate::proxy::inflight::{Inflight, InflightGuard};
 use crate::proxy::record::{Exchange, Outcome, Recorder, Sink, Sinks, Timings, finish_without_response};
 use crate::proxy::served::{FlightBody, Report, ServedBody};
-use crate::proxy::tee::{InflightGuard, TeeBody, TeeParts};
+use crate::proxy::tee::{TeeBody, TeeParts};
 use crate::proxy::usage::{self, UsageFilter};
 use crate::proxy::{Upstream, errors, headers};
 use crate::store::Store;
@@ -59,7 +59,7 @@ pub struct Gateway {
     /// The cache first, then the sink the gateway was built with.
     sink: Arc<dyn Sink>,
     cache: Arc<Cache>,
-    inflight: Arc<AtomicUsize>,
+    inflight: Arc<Inflight>,
     /// Span ids are chosen per request only when spans are exported.
     spans: bool,
 }
@@ -73,15 +73,36 @@ impl Gateway {
         let cache = Arc::new(Cache::new(&config, store));
         // The cache stores answers before anything else sees the exchange.
         let sink: Arc<dyn Sink> = Arc::new(Sinks(vec![Arc::clone(&cache) as Arc<dyn Sink>, sink]));
-        Ok(Arc::new(Self { config, upstream, keys, sink, cache, inflight: Arc::new(AtomicUsize::new(0)), spans }))
+        Ok(Arc::new(Self { config, upstream, keys, sink, cache, inflight: Arc::default(), spans }))
     }
 
     pub fn cache(&self) -> &Arc<Cache> {
         &self.cache
     }
 
+    pub fn upstream_name(&self) -> &str {
+        &self.config.upstream.name
+    }
+
+    /// Asks the upstream for its version (the dashboard's status line). `Err` says why it didn't answer.
+    pub async fn probe_upstream(&self) -> Result<Option<String>, String> {
+        let request = self.upstream.client.get(self.upstream.url_for("/api/version")).timeout(Duration::from_secs(2));
+        let response = request.send().await.map_err(|e| e.to_string())?;
+        if !response.status().is_success() {
+            return Err(format!("status {}", response.status()));
+        }
+        let body = response.bytes().await.map_err(|e| e.to_string())?;
+        let value: serde_json::Value = serde_json::from_slice(&body).map_err(|e| e.to_string())?;
+        Ok(value.get("version").and_then(|v| v.as_str()).map(str::to_string))
+    }
+
     pub fn inflight(&self) -> usize {
-        self.inflight.load(Ordering::Relaxed)
+        self.inflight.len()
+    }
+
+    /// The exchanges in progress, oldest first.
+    pub fn inflight_list(&self) -> Vec<crate::proxy::inflight::InflightEntry> {
+        self.inflight.list()
     }
 
     pub fn upstream_url(&self) -> &str {
@@ -142,7 +163,7 @@ pub async fn run_admin(
     admin: Arc<admin::Admin>,
     shutdown: impl Future<Output = ()> + Send + 'static,
 ) -> std::io::Result<()> {
-    axum::serve(listener, admin::router(admin)).with_graceful_shutdown(shutdown).await
+    axum::serve(listener, crate::web::router(admin)).with_graceful_shutdown(shutdown).await
 }
 
 /// Binds the configured gateway address.
@@ -305,7 +326,6 @@ fn is_body_too_large(error: &axum::Error) -> bool {
 
 async fn handle(State(gateway): State<Arc<Gateway>>, request: Request) -> Response {
     let started = Instant::now();
-    let inflight = InflightGuard::new(&gateway.inflight);
     let (parts, body) = request.into_parts();
     let traceparent = parts.headers.get("traceparent").and_then(|v| v.to_str().ok()).map(str::to_string);
 
@@ -335,6 +355,7 @@ async fn handle(State(gateway): State<Arc<Gateway>>, request: Request) -> Respon
         traceparent,
         cache: None,
     };
+    let inflight = gateway.inflight.enter(&exchange);
     let mut timings = Timings::default();
 
     if let Err(error) = identity {

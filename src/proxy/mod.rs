@@ -3,6 +3,7 @@
 
 pub mod errors;
 pub mod headers;
+pub mod inflight;
 pub mod record;
 pub mod served;
 pub mod tee;

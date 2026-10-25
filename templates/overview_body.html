@@ -1,0 +1,15 @@
+<div class="tiles">
+{% for t in tiles %}<div class="card tile"><div class="label">{{ t.label }}</div><div class="value">{{ t.value }}</div>{% if !t.note.is_empty() %}<div class="note">{{ t.note }}</div>{% endif %}</div>
+{% endfor %}</div>
+<div class="charts">
+{% for c in charts %}<figure class="card" style="margin:0">
+  <h2>{{ c.title }}</h2>
+  <p class="sub">{{ c.subtitle }}</p>
+  {% if c.legend.len() > 1 %}<div class="legend">{% for l in c.legend %}<span><i class="key {{ l.kind }} {{ l.class }}"></i>{{ l.name }}</span>{% endfor %}</div>{% endif %}
+  {{ c.svg|safe }}
+  <details class="table-view"><summary>Table</summary><div class="scroll"><table class="data">
+    <thead><tr>{% for h in c.head %}<th>{{ h }}</th>{% endfor %}</tr></thead>
+    <tbody>{% for r in c.rows %}<tr>{% for v in r %}<td>{{ v }}</td>{% endfor %}</tr>{% endfor %}</tbody>
+  </table></div></details>
+</figure>
+{% endfor %}</div>

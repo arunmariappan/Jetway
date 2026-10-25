@@ -1,0 +1,17 @@
+{% extends "base.html" %}
+{% block content %}
+<h1>Apps</h1>
+<div class="filters">
+  <div class="segmented" role="group" aria-label="Time window">
+    {% for w in windows %}<a href="{{ w.href }}" {% if w.current %}class="current" aria-current="true"{% endif %}>{{ w.label }}</a>{% endfor %}
+  </div>
+</div>
+<section class="card">
+{% if rows.is_empty() %}<p class="empty">No requests in this window.</p>{% else %}
+<div class="scroll" style="max-height:none"><table class="data">
+  <thead><tr><th>App</th><th class="num">Requests</th><th class="num">Per minute</th><th class="num">p50</th><th class="num">p95</th><th class="num">First token p50</th><th class="num">Errors</th><th class="num">Cache hits</th><th class="num">Tokens in / out</th><th class="num">Saved tokens</th></tr></thead>
+  <tbody>{% for r in rows %}<tr>{% for v in r %}{% if loop.first %}<td><a href="/?app={{ v }}&window={{ window }}">{{ v }}</a></td>{% else %}<td class="num">{{ v }}</td>{% endif %}{% endfor %}</tr>{% endfor %}</tbody>
+</table></div>
+{% endif %}
+</section>
+{% endblock %}
