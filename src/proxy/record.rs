@@ -12,6 +12,7 @@ use tokio::sync::{mpsc, oneshot};
 use tokio::time::Instant;
 use ulid::Ulid;
 
+use crate::cache::CacheNote;
 use crate::protocol::decode::{NdjsonDecoder, SseDecoder};
 use crate::protocol::summary::{RequestSummary, ResponseSummary};
 use crate::protocol::{Framing, Protocol};
@@ -41,6 +42,8 @@ pub struct Exchange {
     pub traceparent: Option<String>,
     /// Set when spans are exported (`otel.endpoint`).
     pub spans: Option<SpanIds>,
+    /// What the cache did, for generation and embedding requests.
+    pub cache: Option<CacheNote>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]

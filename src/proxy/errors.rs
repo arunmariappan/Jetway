@@ -83,7 +83,7 @@ mod tests {
         let openai = error_body(Protocol::OpenAi, StatusCode::BAD_GATEWAY, "Ollama isn't reachable");
         assert_eq!(
             openai,
-            r#"{"error":{"code":null,"message":"Ollama isn't reachable","param":null,"type":"upstream_unavailable"}}"#
+            r#"{"error":{"message":"Ollama isn't reachable","type":"upstream_unavailable","param":null,"code":null}}"#
         );
     }
 

@@ -53,6 +53,8 @@ pub struct ExchangeRow {
     pub parent_span_id: Option<String>,
     pub truncated: bool,
     pub incomplete: bool,
+    /// JSON: what the cache did ([`crate::cache::CacheNote`]).
+    pub cache: Option<String>,
 }
 
 fn us(d: Option<Duration>) -> Option<i64> {
@@ -121,6 +123,7 @@ impl ExchangeRow {
             parent_span_id: trace.map(|(_, s)| s),
             truncated: f.truncated,
             incomplete: f.incomplete,
+            cache: f.exchange.cache.as_ref().map(crate::cache::CacheNote::to_json),
         }
     }
 }
@@ -129,14 +132,14 @@ const COLUMNS: &str = "id, started_at, app, protocol, method, path, class, model
     seed, max_tokens, messages, has_images, has_tools, has_format, status, outcome, error, request_bytes, response_bytes,
     upstream_sent_us, headers_us, first_chunk_us, first_token_us, first_thinking_us, done_us, queue_wait_us,
     prompt_tokens, completion_tokens, cached_prompt_tokens, load_ns, prompt_eval_ns, eval_ns, total_ns, done_reason,
-    response_model, trace_id, parent_span_id, truncated, incomplete";
+    response_model, trace_id, parent_span_id, truncated, incomplete, cache";
 
 pub fn insert(connection: &Connection, r: &ExchangeRow) -> rusqlite::Result<()> {
     connection.execute(
         &format!(
             "INSERT OR REPLACE INTO exchanges ({COLUMNS}) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13,
              ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26, ?27, ?28, ?29, ?30, ?31, ?32, ?33, ?34,
-             ?35, ?36, ?37, ?38, ?39, ?40, ?41, ?42, ?43)"
+             ?35, ?36, ?37, ?38, ?39, ?40, ?41, ?42, ?43, ?44)"
         ),
         params![
             r.id,
@@ -182,6 +185,7 @@ pub fn insert(connection: &Connection, r: &ExchangeRow) -> rusqlite::Result<()> 
             r.parent_span_id,
             r.truncated,
             r.incomplete,
+            r.cache,
         ],
     )?;
     Ok(())
@@ -232,6 +236,7 @@ fn from_row(row: &Row<'_>) -> rusqlite::Result<ExchangeRow> {
         parent_span_id: row.get(40)?,
         truncated: row.get(41)?,
         incomplete: row.get(42)?,
+        cache: row.get(43)?,
     })
 }
 
@@ -288,6 +293,10 @@ pub struct RollupRow {
     pub rejected: i64,
     pub prompt_tokens: i64,
     pub completion_tokens: i64,
+    pub cache_hits: i64,
+    pub cache_joined: i64,
+    pub saved_tokens: i64,
+    pub saved_gpu_ms: i64,
     pub latency: Vec<u8>,
     pub ttft: Vec<u8>,
     pub added: Vec<u8>,
@@ -297,8 +306,9 @@ pub struct RollupRow {
 pub fn upsert_rollup(connection: &Connection, r: &RollupRow) -> rusqlite::Result<()> {
     connection.execute(
         "INSERT OR REPLACE INTO rollups_minute (minute, app, model, requests, ok, upstream_errors, cancelled, timeouts,
-         rejected, prompt_tokens, completion_tokens, latency, ttft, added, tokens_per_second)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
+         rejected, prompt_tokens, completion_tokens, latency, ttft, added, tokens_per_second, cache_hits,
+         cache_joined, saved_tokens, saved_gpu_ms)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19)",
         params![
             r.minute_ms,
             r.app,
@@ -314,7 +324,11 @@ pub fn upsert_rollup(connection: &Connection, r: &RollupRow) -> rusqlite::Result
             r.latency,
             r.ttft,
             r.added,
-            r.tokens_per_second
+            r.tokens_per_second,
+            r.cache_hits,
+            r.cache_joined,
+            r.saved_tokens,
+            r.saved_gpu_ms
         ],
     )?;
     Ok(())
@@ -323,7 +337,8 @@ pub fn upsert_rollup(connection: &Connection, r: &RollupRow) -> rusqlite::Result
 pub fn rollups_since(connection: &Connection, since_ms: i64) -> rusqlite::Result<Vec<RollupRow>> {
     let mut statement = connection.prepare(
         "SELECT minute, app, model, requests, ok, upstream_errors, cancelled, timeouts, rejected, prompt_tokens,
-         completion_tokens, latency, ttft, added, tokens_per_second FROM rollups_minute WHERE minute >= ?1 ORDER BY minute",
+         completion_tokens, latency, ttft, added, tokens_per_second, cache_hits, cache_joined, saved_tokens,
+         saved_gpu_ms FROM rollups_minute WHERE minute >= ?1 ORDER BY minute",
     )?;
     statement
         .query_map([since_ms], |row| {
@@ -343,6 +358,10 @@ pub fn rollups_since(connection: &Connection, since_ms: i64) -> rusqlite::Result
                 ttft: row.get(12)?,
                 added: row.get(13)?,
                 tokens_per_second: row.get(14)?,
+                cache_hits: row.get(15)?,
+                cache_joined: row.get(16)?,
+                saved_tokens: row.get(17)?,
+                saved_gpu_ms: row.get(18)?,
             })
         })?
         .collect()

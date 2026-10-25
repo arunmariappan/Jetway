@@ -25,12 +25,16 @@ pub struct Admin {
 impl Admin {
     pub fn gauges(&self) -> Gauges {
         let counters = self.store.as_ref().map(|s| &s.counters);
+        let (cache_entries, cache_bytes) = self.gateway.cache().memory_usage();
         Gauges {
             in_flight: self.gateway.inflight(),
             log_dropped: counters.map_or(0, |c| c.dropped.load(Ordering::Relaxed)),
             log_write_errors: counters.map_or(0, |c| c.write_errors.load(Ordering::Relaxed)),
             memory_bytes: metrics::memory_bytes(),
             uptime: self.started.elapsed(),
+            cache_entries,
+            cache_bytes,
+            flights: self.gateway.cache().flights.len(),
         }
     }
 }

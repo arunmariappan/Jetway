@@ -66,7 +66,7 @@ pub async fn start(
         sinks.push(Arc::new(Telemetry::start(&config.otel.endpoint, &config.otel.service_name, &config.upstream.url)));
     }
     sinks.extend(extra);
-    let gateway = Gateway::new(config.clone(), Arc::new(Sinks(sinks)))?;
+    let gateway = Gateway::new(config.clone(), Arc::new(Sinks(sinks)), Some(Arc::clone(&store)))?;
     let admin = Arc::new(Admin {
         gateway: Arc::clone(&gateway),
         metrics: Arc::clone(&metrics),

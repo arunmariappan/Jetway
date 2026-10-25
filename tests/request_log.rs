@@ -151,8 +151,8 @@ async fn a_busy_database_drops_records_instead_of_blocking_requests() {
 async fn migrations_are_idempotent_and_prune_cascades_to_bodies() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("m.db");
-    assert_eq!(Store::migrate_only(&path).unwrap(), 1);
-    assert_eq!(Store::migrate_only(&path).unwrap(), 1);
+    assert_eq!(Store::migrate_only(&path).unwrap(), jetway::store::SCHEMA_VERSION);
+    assert_eq!(Store::migrate_only(&path).unwrap(), jetway::store::SCHEMA_VERSION);
 
     let store = Store::open(&path).unwrap();
     for (i, at) in [(1, 1_000), (2, 5_000)] {

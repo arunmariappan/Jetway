@@ -3,6 +3,7 @@
 //! channel is full, the record is dropped and counted. Reads use a small pool of read-only connections on the
 //! blocking thread pool.
 
+mod cache_rows;
 mod row;
 mod schema;
 pub mod sink;
@@ -16,7 +17,11 @@ use bytes::Bytes;
 use rusqlite::{Connection, OpenFlags, params};
 use tokio::sync::{mpsc, oneshot};
 
+pub use cache_rows::CacheRow;
 pub use row::{ExchangeRow, RollupRow};
+pub use schema::LATEST as SCHEMA_VERSION;
+
+use crate::cache::Entry;
 
 const CHANNEL_OPS: usize = 4096;
 const BATCH: usize = 200;
@@ -48,6 +53,9 @@ enum WriteOp {
     Rollups(Vec<RollupRow>),
     Prune { exchanges_before_ms: i64, rollups_before_ms: i64, done: oneshot::Sender<(usize, usize)> },
     Flush(oneshot::Sender<()>),
+    CachePut(Box<([u8; 32], Entry)>),
+    CacheHit([u8; 32], i64),
+    CacheClear { app: Option<String>, done: oneshot::Sender<usize> },
 }
 
 /// Filters for listing exchanges.
@@ -215,6 +223,46 @@ impl Store {
     pub async fn rollups_since(&self, since_ms: i64) -> Result<Vec<RollupRow>, StoreError> {
         self.read(move |c| row::rollups_since(c, since_ms)).await
     }
+
+    /// Queues a cache entry for writing (replacing any with the same key).
+    pub fn cache_put(&self, key: [u8; 32], entry: Entry) {
+        if self.tx.try_send(WriteOp::CachePut(Box::new((key, entry)))).is_err() {
+            self.counters.dropped.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    pub fn cache_hit(&self, key: [u8; 32], at_ms: i64) {
+        let _ = self.tx.try_send(WriteOp::CacheHit(key, at_ms));
+    }
+
+    /// Deletes cache entries, for one app or all. Returns how many.
+    pub async fn cache_clear(&self, app: Option<String>) -> Result<usize, StoreError> {
+        let (done, wait) = oneshot::channel();
+        self.tx.send(WriteOp::CacheClear { app, done }).await.map_err(|_| StoreError::WriterGone)?;
+        wait.await.map_err(|_| StoreError::WriterGone)
+    }
+
+    /// An unexpired entry by key.
+    pub async fn cache_get(&self, key: [u8; 32], now_ms: i64) -> Result<Option<Entry>, StoreError> {
+        let found = self.read(move |c| cache_rows::get(c, &key, now_ms)).await?;
+        match found {
+            Some((entry, raw)) => {
+                let raw = zstd::decode_all(&raw[..]).map_err(StoreError::Decompress)?;
+                Ok(Some(Entry { raw: Bytes::from(raw), ..entry }))
+            }
+            None => Ok(None),
+        }
+    }
+
+    /// Unexpired entries, most hit first.
+    pub async fn cache_list(
+        &self,
+        app: Option<String>,
+        limit: usize,
+        now_ms: i64,
+    ) -> Result<Vec<CacheRow>, StoreError> {
+        self.read(move |c| cache_rows::list(c, app.as_deref(), limit, now_ms)).await
+    }
 }
 
 impl Drop for Store {
@@ -277,9 +325,25 @@ fn apply(connection: &mut Connection, batch: Vec<WriteOp>) -> rusqlite::Result<(
             WriteOp::Prune { exchanges_before_ms, rollups_before_ms, done } => {
                 let exchanges = tx.execute("DELETE FROM exchanges WHERE started_at < ?1", [exchanges_before_ms])?;
                 let rollups = tx.execute("DELETE FROM rollups_minute WHERE minute < ?1", [rollups_before_ms])?;
+                let now = jiff::Timestamp::now().as_millisecond();
+                tx.execute("DELETE FROM cache_entries WHERE expires_at <= ?1", [now])?;
                 replies.push(Reply::Prune(done, (exchanges, rollups)));
             }
             WriteOp::Flush(done) => replies.push(Reply::Flush(done)),
+            WriteOp::CachePut(boxed) => {
+                let (key, entry) = *boxed;
+                cache_rows::put(&tx, &key, &entry, &compress(&entry.raw))?;
+            }
+            WriteOp::CacheHit(key, at) => {
+                tx.execute(
+                    "UPDATE cache_entries SET hits = hits + 1, last_hit_at = ?2 WHERE key = ?1",
+                    params![&key[..], at],
+                )?;
+            }
+            WriteOp::CacheClear { app, done } => {
+                let deleted = tx.execute("DELETE FROM cache_entries WHERE ?1 IS NULL OR app = ?1", params![app])?;
+                replies.push(Reply::Cleared(done, deleted));
+            }
         }
     }
     tx.commit()?;
@@ -291,6 +355,9 @@ fn apply(connection: &mut Connection, batch: Vec<WriteOp>) -> rusqlite::Result<(
             Reply::Flush(done) => {
                 let _ = done.send(());
             }
+            Reply::Cleared(done, deleted) => {
+                let _ = done.send(deleted);
+            }
         }
     }
     Ok(())
@@ -299,4 +366,5 @@ fn apply(connection: &mut Connection, batch: Vec<WriteOp>) -> rusqlite::Result<(
 enum Reply {
     Prune(oneshot::Sender<(usize, usize)>, (usize, usize)),
     Flush(oneshot::Sender<()>),
+    Cleared(oneshot::Sender<usize>, usize),
 }

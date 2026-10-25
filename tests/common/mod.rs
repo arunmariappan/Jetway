@@ -59,9 +59,11 @@ impl Harness {
         let mut config = Config::default();
         config.upstream.url = fake.url();
         config.server.shutdown_grace_seconds = 2;
+        // Pass-through tests send identical requests on purpose; cache tests turn the cache on.
+        config.cache.exact = false;
         edit(&mut config);
         let records = Collect::default();
-        let gateway = Gateway::new(config, Arc::new(records.clone())).unwrap();
+        let gateway = Gateway::new(config, Arc::new(records.clone()), None).unwrap();
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let url = format!("http://{}", listener.local_addr().unwrap());
         let (stop, stopped) = oneshot::channel::<()>();
@@ -122,6 +124,7 @@ impl Stack {
         config.upstream.url = fake.url();
         config.server.shutdown_grace_seconds = 2;
         config.store.path = dir.path().join("jetway.db");
+        config.cache.exact = false;
         edit(&mut config);
         let records = Collect::default();
         let gateway = TcpListener::bind("127.0.0.1:0").await.unwrap();

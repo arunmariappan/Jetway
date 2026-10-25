@@ -23,6 +23,15 @@ bodies = "all"                     # none | errors | all (zstd-compressed)
 retention_days = 7                 # exchanges and bodies; 0 keeps them forever
 rollup_retention_days = 90         # per-minute rollups for history charts
 
+[cache]                            # per app: [apps.<name>.cache] with exact, sampled, replay, join
+exact = true
+shared = false                     # true: apps share entries
+max_memory_bytes = 268_435_456     # 256 MiB in memory; everything is also kept in SQLite until it expires
+ttl_hours = 168
+sampled = "allow"                  # allow | skip: requests with temperature > 0 (or the model's default) and no seed
+replay = "instant"                 # instant | paced (cached streams at the original token rate)
+join = true                        # identical requests in flight share one upstream call
+
 [otel]
 endpoint = ""                      # e.g. "http://127.0.0.1:8200" (BlackBox) or the Aspire dashboard's OTLP/HTTP port
 service_name = "jetway"

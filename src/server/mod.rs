@@ -1,5 +1,5 @@
-//! The gateway listener (phase 1): app identity, the path allow-list, forwarding with the stream tee, and graceful
-//! shutdown.
+//! The gateway listener: app identity, the path allow-list (phase 1), the exact cache and joined requests
+//! (phase 3), forwarding with the stream tee, and graceful shutdown.
 
 pub mod admin;
 pub mod identity;
@@ -25,13 +25,18 @@ use tokio::sync::Notify;
 use tokio::time::Instant;
 use ulid::Ulid;
 
-use crate::config::Config;
+use crate::cache::answer::{self, Entry};
+use crate::cache::flight::{Joined, Reader, Start, fly};
+use crate::cache::{CACHE_HEADER, Cache, CacheKey, hit_note, joined_note};
+use crate::config::{Config, Replay};
 use crate::protocol::summary::RequestSummary;
 use crate::protocol::{Framing, Protocol};
-use crate::proxy::record::{Exchange, Outcome, Recorder, Sink, Timings, finish_without_response};
+use crate::proxy::record::{Exchange, Outcome, Recorder, Sink, Sinks, Timings, finish_without_response};
+use crate::proxy::served::{FlightBody, Report, ServedBody};
 use crate::proxy::tee::{InflightGuard, TeeBody, TeeParts};
 use crate::proxy::usage::{self, UsageFilter};
 use crate::proxy::{Upstream, errors, headers};
+use crate::store::Store;
 use crate::telemetry::SpanIds;
 use identity::{DEFAULT_APP, KeyMap, identify};
 use routes::{PathClass, classify};
@@ -51,18 +56,28 @@ pub struct Gateway {
     config: Config,
     upstream: Upstream,
     keys: KeyMap,
+    /// The cache first, then the sink the gateway was built with.
     sink: Arc<dyn Sink>,
+    cache: Arc<Cache>,
     inflight: Arc<AtomicUsize>,
     /// Span ids are chosen per request only when spans are exported.
     spans: bool,
 }
 
 impl Gateway {
-    pub fn new(config: Config, sink: Arc<dyn Sink>) -> Result<Arc<Self>, reqwest::Error> {
+    /// `store` persists the cache across restarts; without one the cache lives in memory only.
+    pub fn new(config: Config, sink: Arc<dyn Sink>, store: Option<Arc<Store>>) -> Result<Arc<Self>, reqwest::Error> {
         let upstream = Upstream::new(&config.upstream)?;
         let keys = KeyMap::from_config(&config);
         let spans = !config.otel.endpoint.is_empty();
-        Ok(Arc::new(Self { config, upstream, keys, sink, inflight: Arc::new(AtomicUsize::new(0)), spans }))
+        let cache = Arc::new(Cache::new(&config, store));
+        // The cache stores answers before anything else sees the exchange.
+        let sink: Arc<dyn Sink> = Arc::new(Sinks(vec![Arc::clone(&cache) as Arc<dyn Sink>, sink]));
+        Ok(Arc::new(Self { config, upstream, keys, sink, cache, inflight: Arc::new(AtomicUsize::new(0)), spans }))
+    }
+
+    pub fn cache(&self) -> &Arc<Cache> {
+        &self.cache
     }
 
     pub fn inflight(&self) -> usize {
@@ -164,6 +179,118 @@ fn set_id(response: &mut Response, id: Ulid) {
     }
 }
 
+fn set_header(response: &mut Response, name: &'static str, value: &str) {
+    if let Ok(value) = HeaderValue::from_str(value) {
+        response.headers_mut().insert(name, value);
+    }
+}
+
+/// Serves a cache hit in the request's protocol and stream mode (phase 3.3).
+fn serve_hit(
+    gateway: &Gateway,
+    mut exchange: Exchange,
+    key: CacheKey,
+    entry: &Entry,
+    timings: Timings,
+    inflight: InflightGuard,
+) -> Response {
+    let summary = exchange.summary.as_ref();
+    let stream = exchange.class == PathClass::Generation && summary.is_some_and(|s| s.stream);
+    let include_usage = summary.is_some_and(|s| s.include_usage);
+    let served = answer::serve(entry, exchange.protocol, stream, include_usage);
+    let note = hit_note(key, entry);
+    let (age, source) = (note.age_s.unwrap_or(0), note.source.clone().unwrap_or_default());
+    exchange.cache = Some(note);
+    gateway.cache.hit(&key);
+
+    let paced = stream && gateway.cache.replay(&exchange.app) == Replay::Paced;
+    let (pieces, gap) = if paced {
+        let items: Vec<Bytes> = served
+            .pieces
+            .iter()
+            .flat_map(|piece| answer::split_items(piece, exchange.protocol == Protocol::OpenAi))
+            .collect();
+        let generation = Duration::from_nanos(entry.answer.eval_ns.unwrap_or(0));
+        let gap = generation / u32::try_from(items.len().max(1)).unwrap_or(u32::MAX);
+        (items, gap)
+    } else {
+        (served.pieces, Duration::ZERO)
+    };
+    let length: usize = pieces.iter().map(Bytes::len).sum();
+    let framing = Framing::from_content_type(Some(&served.content_type));
+    let id = exchange.id;
+    let report = Report { exchange, sink: Arc::clone(&gateway.sink), status: 200, framing, timings, inflight };
+    let mut response = Response::new(Body::from_stream(ServedBody::new(pieces, gap, report)));
+    set_header(&mut response, "content-type", &served.content_type);
+    if !paced {
+        set_header(&mut response, "content-length", &length.to_string());
+    }
+    set_header(&mut response, CACHE_HEADER, "hit");
+    set_header(&mut response, "x-jetway-cache-age", &age.to_string());
+    set_header(&mut response, "x-jetway-source", &source);
+    set_id(&mut response, id);
+    response
+}
+
+/// Records a joined exchange as cancelled if its client leaves while it waits for the flight's response.
+struct PendingReport(Option<Report>);
+
+impl Drop for PendingReport {
+    fn drop(&mut self) {
+        if let Some(report) = self.0.take() {
+            report.finish(Outcome::ClientCancelled, None, None, 0);
+        }
+    }
+}
+
+/// Serves a request that joined an identical one in flight (phase 3.5).
+async fn serve_joined(
+    gateway: &Gateway,
+    mut exchange: Exchange,
+    reader: Reader,
+    timings: Timings,
+    inflight: InflightGuard,
+) -> Response {
+    let flight = Arc::clone(reader.flight());
+    exchange.cache = Some(joined_note(exchange.cache.as_ref().and_then(|n| n.key), &flight.leader));
+    let id = exchange.id;
+    let protocol = exchange.protocol;
+    let sink = Arc::clone(&gateway.sink);
+    let mut pending =
+        PendingReport(Some(Report { exchange, sink, status: 0, framing: Framing::Whole, timings, inflight }));
+    let start = flight.wait_start().await;
+    let Some(mut report) = pending.0.take() else {
+        return errors::error_response(protocol, StatusCode::BAD_GATEWAY, "the joined request lost its report");
+    };
+    let mut response = match start {
+        Some(Start::Response { status, headers }) => {
+            report.status = status.as_u16();
+            report.framing = Framing::from_content_type(headers.get(CONTENT_TYPE).and_then(|v| v.to_str().ok()));
+            let mut response = Response::new(Body::from_stream(FlightBody::joined(reader, report)));
+            *response.status_mut() = status;
+            *response.headers_mut() = headers;
+            response
+        }
+        Some(Start::Failed { status, headers, body }) => {
+            report.status = status.as_u16();
+            report.finish(Outcome::UpstreamError, Some("the request it joined failed".into()), None, body.len() as u64);
+            let mut response = Response::new(Body::from(body));
+            *response.status_mut() = status;
+            *response.headers_mut() = headers;
+            response
+        }
+        None => {
+            let message = "the request it joined ended without a response";
+            report.status = 502;
+            report.finish(Outcome::UpstreamError, Some(message.into()), None, 0);
+            errors::error_response(protocol, StatusCode::BAD_GATEWAY, message)
+        }
+    };
+    set_header(&mut response, CACHE_HEADER, "joined");
+    set_id(&mut response, id);
+    response
+}
+
 fn is_body_too_large(error: &axum::Error) -> bool {
     let mut source: Option<&(dyn std::error::Error + 'static)> = Some(error);
     while let Some(e) = source {
@@ -205,6 +332,7 @@ async fn handle(State(gateway): State<Arc<Gateway>>, request: Request) -> Respon
         summary: None,
         spans: gateway.spans.then(|| SpanIds::new(traceparent.as_deref())),
         traceparent,
+        cache: None,
     };
     let mut timings = Timings::default();
 
@@ -240,9 +368,48 @@ async fn handle(State(gateway): State<Arc<Gateway>>, request: Request) -> Respon
         }
     };
     exchange.request = request_body.clone();
-    if matches!(class, PathClass::Generation | PathClass::Embedding) {
-        exchange.summary = RequestSummary::parse(protocol, &request_body);
+    let body_value: Option<serde_json::Value> = matches!(class, PathClass::Generation | PathClass::Embedding)
+        .then(|| serde_json::from_slice(&request_body).ok())
+        .flatten();
+    if let Some(value) = &body_value {
+        exchange.summary = RequestSummary::from_value(protocol, value);
+        if class == PathClass::Embedding
+            && let Some(summary) = &mut exchange.summary
+        {
+            // Embedding endpoints never stream, whatever Ollama's default says for chat.
+            summary.stream = false;
+        }
     }
+
+    // The exact cache, then joining an identical request in flight (phase 3).
+    let decision = gateway.cache.decide(&exchange, body_value.as_ref(), &parts.headers);
+    exchange.cache = decision.as_ref().map(|d| d.note.clone());
+    let mut leader = None;
+    if let Some(decision) = &decision
+        && decision.lookup
+    {
+        if let Some(key) = decision.note.key
+            && let Some(entry) = gateway.cache.lookup(&key).await
+        {
+            return serve_hit(&gateway, exchange, key, &entry, timings, inflight);
+        }
+        if let Some(join_key) = decision.join {
+            match gateway.cache.flights.join_or_lead(join_key, exchange.id) {
+                Joined::Follower(reader) => return serve_joined(&gateway, exchange, reader, timings, inflight).await,
+                Joined::Leader(flight) => leader = Some((join_key, flight)),
+            }
+        }
+    }
+    // Joined requests waiting on a flight whose upstream call failed get the same error.
+    let fail_flight = |status: StatusCode, message: &str| {
+        if let Some((key, flight)) = &leader {
+            let mut headers = axum::http::HeaderMap::new();
+            headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json; charset=utf-8"));
+            let body = errors::error_body(protocol, status, message);
+            flight.started(Start::Failed { status, headers, body });
+            gateway.cache.flights.remove(key, flight);
+        }
+    };
 
     // Exact token counts for OpenAI streams: ask for usage the client didn't, and hide it again (plan D21).
     let mut upstream_body = request_body;
@@ -279,10 +446,12 @@ async fn handle(State(gateway): State<Arc<Gateway>>, request: Request) -> Respon
             } else {
                 format!("the upstream request failed: {error}")
             };
+            fail_flight(StatusCode::BAD_GATEWAY, &message);
             return reject(&gateway, exchange, StatusCode::BAD_GATEWAY, Outcome::UpstreamError, timings, message);
         }
         Err(_) => {
             let message = format!("no response from the upstream within {} s", upstream.first_byte_timeout.as_secs());
+            fail_flight(StatusCode::GATEWAY_TIMEOUT, &message);
             return reject(&gateway, exchange, StatusCode::GATEWAY_TIMEOUT, Outcome::Timeout, timings, message);
         }
     };
@@ -301,6 +470,7 @@ async fn handle(State(gateway): State<Arc<Gateway>>, request: Request) -> Respon
     let expected_len =
         if bodyless { Some(0) } else { client_headers.get(CONTENT_LENGTH).and_then(|v| v.to_str().ok()?.parse().ok()) };
     let id = exchange.id;
+    let cache_result = exchange.cache.as_ref().map(|n| n.result.as_str());
     let tee = TeeBody::new(TeeParts {
         upstream: response.bytes_stream().boxed(),
         idle_timeout: upstream.idle_timeout,
@@ -316,9 +486,32 @@ async fn handle(State(gateway): State<Arc<Gateway>>, request: Request) -> Respon
         inflight,
     });
 
-    let mut response = Response::new(Body::from_stream(tee));
+    let body = match leader {
+        Some((key, flight)) => {
+            flight.started(Start::Response { status, headers: client_headers.clone() });
+            match flight.reader() {
+                Some(reader) => {
+                    // A task reads the upstream for every client of the flight, this one included.
+                    let gateway = Arc::clone(&gateway);
+                    tokio::spawn(async move {
+                        fly(Arc::clone(&flight), tee).await;
+                        gateway.cache.flights.remove(&key, &flight);
+                    });
+                    Body::from_stream(FlightBody::leader(reader))
+                }
+                // A new flight has no readers to lose, so this can't happen; fall back to the plain stream.
+                None => Body::from_stream(tee),
+            }
+        }
+        None => Body::from_stream(tee),
+    };
+
+    let mut response = Response::new(body);
     *response.status_mut() = status;
     *response.headers_mut() = client_headers;
+    if let Some(result) = cache_result {
+        set_header(&mut response, CACHE_HEADER, result);
+    }
     set_id(&mut response, id);
     response
 }

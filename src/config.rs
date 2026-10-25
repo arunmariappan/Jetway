@@ -18,6 +18,7 @@ pub struct Config {
     pub server: ServerConfig,
     pub upstream: UpstreamConfig,
     pub store: StoreConfig,
+    pub cache: CacheConfig,
     pub otel: OtelConfig,
     /// Per-app settings by app name. Apps that aren't listed use `default`'s settings, or built-in defaults.
     pub apps: BTreeMap<String, AppConfig>,
@@ -108,6 +109,66 @@ pub enum BodyPolicy {
     All,
 }
 
+/// The exact cache and joined requests (plan D9, D14, phase 3).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct CacheConfig {
+    pub exact: bool,
+    /// When true, apps share entries; otherwise each app has its own.
+    pub shared: bool,
+    pub max_memory_bytes: u64,
+    pub ttl_hours: u64,
+    /// Requests with a temperature above 0 (or the model's default) and no seed.
+    pub sampled: SampledPolicy,
+    pub replay: Replay,
+    /// Identical requests in flight share one upstream call.
+    pub join: bool,
+}
+
+impl Default for CacheConfig {
+    fn default() -> Self {
+        Self {
+            exact: true,
+            shared: false,
+            max_memory_bytes: 256 * 1024 * 1024,
+            ttl_hours: 168,
+            sampled: SampledPolicy::Allow,
+            replay: Replay::Instant,
+            join: true,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum SampledPolicy {
+    Allow,
+    Skip,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Replay {
+    /// A cached stream is sent at once.
+    Instant,
+    /// A cached stream is sent at the original generation rate.
+    Paced,
+}
+
+/// Per-app overrides of [`CacheConfig`]; unset fields use the global value.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct AppCacheConfig {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub exact: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sampled: Option<SampledPolicy>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub replay: Option<Replay>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub join: Option<bool>,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct OtelConfig {
@@ -130,6 +191,7 @@ pub struct AppConfig {
     pub keys: Vec<String>,
     /// May use Ollama's model-management endpoints (`pull`, `delete`, `create`, ...).
     pub admin: bool,
+    pub cache: AppCacheConfig,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -202,6 +264,9 @@ impl Config {
         }
         if upstream.slots == 0 {
             problems.push("upstream.slots must be at least 1".into());
+        }
+        if self.cache.ttl_hours == 0 {
+            problems.push("cache.ttl_hours must be at least 1".into());
         }
 
         if !self.otel.endpoint.is_empty()

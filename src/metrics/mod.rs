@@ -10,6 +10,7 @@ use std::time::Duration;
 use hdrhistogram::Histogram;
 use hdrhistogram::serialization::{Serializer, V2Serializer};
 
+use crate::cache::CacheResult;
 use crate::proxy::record::{Finished, Outcome};
 use crate::store::RollupRow;
 
@@ -35,6 +36,11 @@ pub struct Minute {
     pub outcomes: [u64; 5],
     pub prompt_tokens: u64,
     pub completion_tokens: u64,
+    pub cache_hits: u64,
+    pub cache_joined: u64,
+    /// Tokens and GPU time that hits saved.
+    pub saved_tokens: u64,
+    pub saved_gpu_ms: u64,
     /// Microseconds.
     pub latency: Histogram<u64>,
     pub ttft: Histogram<u64>,
@@ -50,6 +56,10 @@ impl Default for Minute {
             outcomes: [0; 5],
             prompt_tokens: 0,
             completion_tokens: 0,
+            cache_hits: 0,
+            cache_joined: 0,
+            saved_tokens: 0,
+            saved_gpu_ms: 0,
             latency: histogram(),
             ttft: histogram(),
             added: histogram(),
@@ -70,6 +80,10 @@ impl Minute {
         }
         self.prompt_tokens += other.prompt_tokens;
         self.completion_tokens += other.completion_tokens;
+        self.cache_hits += other.cache_hits;
+        self.cache_joined += other.cache_joined;
+        self.saved_tokens += other.saved_tokens;
+        self.saved_gpu_ms += other.saved_gpu_ms;
         let _ = self.latency.add(&other.latency);
         let _ = self.ttft.add(&other.ttft);
         let _ = self.added.add(&other.added);
@@ -116,6 +130,9 @@ struct State {
     latency: HashMap<Key, Buckets>,
     ttft: HashMap<Key, Buckets>,
     added: HashMap<Key, Buckets>,
+    cache: HashMap<(String, CacheResult), u64>,
+    saved_tokens: HashMap<String, u64>,
+    saved_gpu_ms: HashMap<String, u64>,
     incomplete: u64,
     truncated: u64,
     /// Minutes already written to the store and not changed since.
@@ -135,6 +152,9 @@ pub struct Gauges {
     pub log_write_errors: u64,
     pub memory_bytes: u64,
     pub uptime: Duration,
+    pub cache_entries: u64,
+    pub cache_bytes: u64,
+    pub flights: usize,
 }
 
 fn micros(d: Option<Duration>) -> Option<u64> {
@@ -165,6 +185,11 @@ impl Metrics {
         let tps = generation
             .filter(|g| !g.is_zero() && completion > 0)
             .map(|g| (completion as f64 / g.as_secs_f64() * 100.0).round() as u64);
+        let note = f.exchange.cache.as_ref();
+        let cache_result = note.map(|n| n.result);
+        let saved_tokens =
+            note.map_or(0, |n| n.saved_prompt_tokens.unwrap_or(0) + n.saved_completion_tokens.unwrap_or(0));
+        let saved_gpu_ms = note.and_then(|n| n.saved_gpu_ms).unwrap_or(0);
 
         let mut state = self.lock();
         let entry = state.minutes.entry((minute, app.clone(), model.clone())).or_default();
@@ -172,6 +197,10 @@ impl Metrics {
         entry.outcomes[outcome_index(f.outcome)] += 1;
         entry.prompt_tokens += prompt;
         entry.completion_tokens += completion;
+        entry.cache_hits += u64::from(cache_result == Some(CacheResult::Hit));
+        entry.cache_joined += u64::from(cache_result == Some(CacheResult::Joined));
+        entry.saved_tokens += saved_tokens;
+        entry.saved_gpu_ms += saved_gpu_ms;
         for (histogram, value) in [
             (&mut entry.latency, latency),
             (&mut entry.ttft, ttft),
@@ -188,6 +217,11 @@ impl Metrics {
         }
 
         *state.requests.entry((app.clone(), model.clone(), f.outcome)).or_default() += 1;
+        if let Some(result) = cache_result {
+            *state.cache.entry((app.clone(), result)).or_default() += 1;
+            *state.saved_tokens.entry(app.clone()).or_default() += saved_tokens;
+            *state.saved_gpu_ms.entry(app.clone()).or_default() += saved_gpu_ms;
+        }
         *state.tokens.entry((app.clone(), model.clone(), "prompt")).or_default() += prompt;
         *state.tokens.entry((app.clone(), model.clone(), "completion")).or_default() += completion;
         let key = (app, model);
@@ -270,6 +304,25 @@ impl Metrics {
             );
         }
 
+        out.push_str("# HELP jetway_cache_total Generation and embedding requests by cache result.\n");
+        out.push_str("# TYPE jetway_cache_total counter\n");
+        let mut cache: Vec<_> = state.cache.iter().collect();
+        cache.sort_by(|a, b| a.0.0.cmp(&b.0.0).then(a.0.1.as_str().cmp(b.0.1.as_str())));
+        for ((app, result), n) in cache {
+            let _ = writeln!(out, "jetway_cache_total{{app=\"{}\",result=\"{}\"}} {n}", label(app), result.as_str());
+        }
+        for (name, help, map, scale) in [
+            ("jetway_cache_saved_tokens_total", "Tokens that cache hits saved.", &state.saved_tokens, 1.0),
+            ("jetway_cache_saved_gpu_seconds_total", "Upstream time that cache hits saved.", &state.saved_gpu_ms, 1e-3),
+        ] {
+            let _ = writeln!(out, "# HELP {name} {help}\n# TYPE {name} counter");
+            let mut entries: Vec<_> = map.iter().collect();
+            entries.sort();
+            for (app, n) in entries {
+                let _ = writeln!(out, "{name}{{app=\"{}\"}} {}", label(app), *n as f64 * scale);
+            }
+        }
+
         for (name, help, map) in [
             ("jetway_request_duration_seconds", "Time from receiving a request to its last byte.", &state.latency),
             (
@@ -306,6 +359,9 @@ impl Metrics {
             ("jetway_in_flight", "Exchanges in progress.", gauges.in_flight as f64),
             ("jetway_memory_bytes", "Jetway's resident memory.", gauges.memory_bytes as f64),
             ("jetway_uptime_seconds", "Seconds since Jetway started.", gauges.uptime.as_secs_f64()),
+            ("jetway_cache_entries", "Cache entries held in memory.", gauges.cache_entries as f64),
+            ("jetway_cache_memory_bytes", "Memory the cache's entries use.", gauges.cache_bytes as f64),
+            ("jetway_flights", "Upstream calls that identical requests can join.", gauges.flights as f64),
         ];
         for (name, help, value) in gauge_values {
             let _ = writeln!(out, "# HELP {name} {help}\n# TYPE {name} gauge\n{name} {value}");
@@ -334,6 +390,10 @@ fn to_row(minute: i64, app: &str, model: &str, m: &Minute) -> RollupRow {
         rejected: int(m.count(Outcome::Rejected)),
         prompt_tokens: int(m.prompt_tokens),
         completion_tokens: int(m.completion_tokens),
+        cache_hits: int(m.cache_hits),
+        cache_joined: int(m.cache_joined),
+        saved_tokens: int(m.saved_tokens),
+        saved_gpu_ms: int(m.saved_gpu_ms),
         latency: serialize(&m.latency),
         ttft: serialize(&m.ttft),
         added: serialize(&m.added),
@@ -380,6 +440,7 @@ mod tests {
                 summary: Some(RequestSummary { model: Some("m".into()), ..RequestSummary::default() }),
                 traceparent: None,
                 spans: None,
+                cache: None,
             },
             status: 200,
             outcome,

@@ -2,7 +2,10 @@
 
 use rusqlite::Connection;
 
-const MIGRATIONS: &[&str] = &[V1];
+const MIGRATIONS: &[&str] = &[V1, V2];
+
+/// The schema version a fully migrated database has.
+pub const LATEST: usize = MIGRATIONS.len();
 
 const V1: &str = r"
 CREATE TABLE exchanges (
@@ -87,6 +90,32 @@ CREATE TABLE meta (
     key    TEXT PRIMARY KEY,
     value  TEXT NOT NULL
 );
+";
+
+/// Phase 3: the exact cache, and cache counts in the rollups.
+const V2: &str = r"
+CREATE TABLE cache_entries (
+    key           BLOB PRIMARY KEY,            -- blake3 of the canonical request
+    app           TEXT NOT NULL,
+    path          TEXT NOT NULL,
+    stream        INTEGER NOT NULL,            -- whether raw is a stream
+    content_type  TEXT NOT NULL,
+    source        TEXT NOT NULL,               -- the exchange that produced the answer
+    created_at    INTEGER NOT NULL,            -- epoch milliseconds
+    expires_at    INTEGER NOT NULL,
+    size          INTEGER NOT NULL,            -- raw bytes
+    hits          INTEGER NOT NULL DEFAULT 0,
+    last_hit_at   INTEGER,
+    answer        TEXT NOT NULL,               -- JSON: the protocol-neutral answer
+    raw           BLOB NOT NULL                -- zstd: the bytes the first client received
+);
+CREATE INDEX cache_entries_expires ON cache_entries (expires_at);
+CREATE INDEX cache_entries_app ON cache_entries (app);
+
+ALTER TABLE rollups_minute ADD COLUMN cache_hits INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE rollups_minute ADD COLUMN cache_joined INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE rollups_minute ADD COLUMN saved_tokens INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE rollups_minute ADD COLUMN saved_gpu_ms INTEGER NOT NULL DEFAULT 0;
 ";
 
 pub fn version(connection: &Connection) -> rusqlite::Result<usize> {

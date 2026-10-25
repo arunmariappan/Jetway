@@ -41,6 +41,11 @@ impl RequestSummary {
     /// `None` when the body isn't a JSON object (an empty GET, for example).
     pub fn parse(protocol: Protocol, body: &[u8]) -> Option<Self> {
         let value: Value = serde_json::from_slice(body).ok()?;
+        Self::from_value(protocol, &value)
+    }
+
+    /// From an already parsed body; `None` when it isn't a JSON object.
+    pub fn from_value(protocol: Protocol, value: &Value) -> Option<Self> {
         let object = value.as_object()?;
         let get = |key: &str| object.get(key).filter(|v| !v.is_null());
         let options = get("options");
@@ -101,6 +106,8 @@ pub struct ResponseSummary {
     pub content: String,
     pub thinking: String,
     pub tool_calls: usize,
+    /// The tool calls themselves, assembled from streamed pieces where needed, so a cached answer can be rewritten.
+    pub tool_call_values: Vec<Value>,
     /// A final chunk (`done: true`, a `finish_reason`, `[DONE]`) or a complete unstreamed body was seen.
     pub done: bool,
     pub done_reason: Option<String>,
@@ -175,7 +182,9 @@ impl ResponseSummary {
         let message = value.get("message");
         let content = message.and_then(|m| m.get("content")).or_else(|| value.get("response"));
         let thinking = message.and_then(|m| m.get("thinking")).or_else(|| value.get("thinking"));
-        let calls = message.and_then(|m| m.get("tool_calls")).and_then(Value::as_array).map_or(0, Vec::len);
+        let calls = message.and_then(|m| m.get("tool_calls")).and_then(Value::as_array);
+        self.tool_call_values.extend(calls.into_iter().flatten().cloned());
+        let calls = calls.map_or(0, Vec::len);
         self.tool_calls += calls;
         let mut fed = self.add(content.and_then(Value::as_str), thinking.and_then(Value::as_str));
         fed.content |= calls > 0;
@@ -208,11 +217,14 @@ impl ResponseSummary {
             let thinking = part.and_then(|p| p.get("reasoning").or_else(|| p.get("reasoning_content")));
             let calls = part.and_then(|p| p.get("tool_calls")).and_then(Value::as_array).map_or(0, Vec::len);
             // Streamed tool calls arrive in pieces; count each call once, by its first piece (which has an id).
+            let pieces = part.and_then(|p| p.get("tool_calls")).and_then(Value::as_array);
             let new_calls = if choice.get("delta").is_some() {
-                part.and_then(|p| p.get("tool_calls"))
-                    .and_then(Value::as_array)
-                    .map_or(0, |c| c.iter().filter(|c| c.get("id").is_some()).count())
+                for piece in pieces.into_iter().flatten() {
+                    self.add_tool_call_piece(piece);
+                }
+                pieces.map_or(0, |c| c.iter().filter(|c| c.get("id").is_some()).count())
             } else {
+                self.tool_call_values.extend(pieces.into_iter().flatten().cloned());
                 calls
             };
             self.tool_calls += new_calls;
@@ -236,6 +248,30 @@ impl ResponseSummary {
                 number(usage.pointer("/prompt_tokens_details/cached_tokens")).or(self.cached_prompt_tokens);
         }
         fed
+    }
+
+    /// Merges one streamed OpenAI tool-call piece: the first piece of a call (by `index`) carries its id, type and
+    /// name; later ones append to `function.arguments`.
+    fn add_tool_call_piece(&mut self, piece: &Value) {
+        let index = piece.get("index").and_then(Value::as_u64).unwrap_or(self.tool_call_values.len() as u64) as usize;
+        while self.tool_call_values.len() <= index {
+            self.tool_call_values.push(serde_json::json!({"function": {"arguments": ""}}));
+        }
+        let call = &mut self.tool_call_values[index];
+        for key in ["id", "type"] {
+            if let Some(value) = piece.get(key) {
+                call[key] = value.clone();
+            }
+        }
+        if let Some(function) = piece.get("function") {
+            if let Some(name) = function.get("name") {
+                call["function"]["name"] = name.clone();
+            }
+            if let Some(arguments) = function.get("arguments").and_then(Value::as_str) {
+                let so_far = call["function"]["arguments"].as_str().unwrap_or_default().to_string();
+                call["function"]["arguments"] = Value::String(so_far + arguments);
+            }
+        }
     }
 
     /// Ollama's streamed completions use the same `object` as unstreamed ones; only the stream has no `usage`.
@@ -293,7 +329,9 @@ mod tests {
         assert_eq!(think.content, "391");
         assert!(think.thinking.starts_with("Thinking Process"));
         assert_eq!(think.completion_tokens, Some(391));
-        assert_eq!(summarize(Protocol::Ollama, "chat-tools.json").tool_calls, 1);
+        let tools = summarize(Protocol::Ollama, "chat-tools.json");
+        assert_eq!(tools.tool_calls, 1);
+        assert_eq!(tools.tool_call_values[0]["function"]["arguments"]["city"], "Pune");
         let generate = summarize(Protocol::Ollama, "generate-stream.ndjson");
         assert_eq!(generate.content, summarize(Protocol::Ollama, "generate.json").content);
         assert!(generate.done);
@@ -320,6 +358,23 @@ mod tests {
         // The recorded completion spent its 24 tokens on hidden thinking, so its text is empty.
         assert!(completions.done);
         assert_eq!(completions.done_reason.as_deref(), Some("length"));
+    }
+
+    #[test]
+    fn streamed_openai_tool_calls_are_assembled() {
+        let mut summary = ResponseSummary::default();
+        let pieces = [
+            r#"{"object":"chat.completion.chunk","choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_1","type":"function","function":{"name":"get_weather","arguments":"{\"ci"}}]}}]}"#,
+            r#"{"object":"chat.completion.chunk","choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"ty\":\"Pune\"}"}}]}}]}"#,
+            r#"{"object":"chat.completion.chunk","choices":[{"delta":{},"finish_reason":"tool_calls"}]}"#,
+        ];
+        for piece in pieces {
+            summary.feed(Protocol::OpenAi, piece.as_bytes());
+        }
+        assert_eq!(summary.tool_calls, 1);
+        let call = &summary.tool_call_values[0];
+        assert_eq!((call["id"].as_str(), call["function"]["name"].as_str()), (Some("call_1"), Some("get_weather")));
+        assert_eq!(call["function"]["arguments"], r#"{"city":"Pune"}"#);
     }
 
     #[test]
