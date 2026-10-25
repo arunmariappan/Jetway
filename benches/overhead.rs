@@ -42,7 +42,14 @@ async fn main() {
     for i in 0..REQUESTS + 200 {
         for (base, samples) in [(fake.url(), &mut direct), (jetway.clone(), &mut through)] {
             let started = Instant::now();
-            let response = client.post(format!("{base}/api/chat")).body(body).send().await.unwrap();
+            // The pass-through path: the cache would answer every repeat otherwise.
+            let response = client
+                .post(format!("{base}/api/chat"))
+                .header("x-jetway-cache", "off")
+                .body(body)
+                .send()
+                .await
+                .unwrap();
             response.bytes().await.unwrap();
             if i >= 200 {
                 samples.push(started.elapsed());
@@ -67,6 +74,7 @@ async fn main() {
             let mut response = client
                 .post(format!("{base}/api/chat"))
                 .header(SCRIPT_HEADER, &script)
+                .header("x-jetway-cache", "off")
                 .body(stream_body)
                 .send()
                 .await
@@ -94,6 +102,21 @@ async fn main() {
             ms(percentile(&delays, 1.0))
         );
     }
+    // Cache hits: the same request again and again, after one miss.
+    let hit_body = r#"{"model":"qwen3.5:4b","messages":[{"role":"user","content":"cached"}],"stream":false}"#;
+    client.post(format!("{jetway}/api/chat")).body(hit_body).send().await.unwrap().bytes().await.unwrap();
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    let mut hits = Vec::with_capacity(REQUESTS);
+    for _ in 0..REQUESTS {
+        let started = Instant::now();
+        let response = client.post(format!("{jetway}/api/chat")).body(hit_body).send().await.unwrap();
+        assert_eq!(response.headers()["x-jetway-cache"], "hit");
+        response.bytes().await.unwrap();
+        hits.push(started.elapsed());
+    }
+    hits.sort();
+    println!("cache hits ({REQUESTS}): p50 {}, p99 {}", ms(percentile(&hits, 0.5)), ms(percentile(&hits, 0.99)));
+
     let recorded = running.store.count().await.unwrap();
     println!(
         "recorded {recorded} exchanges, {} dropped",
