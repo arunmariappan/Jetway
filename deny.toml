@@ -2,6 +2,11 @@
 
 [advisories]
 yanked = "deny"
+ignore = [
+  # basic-toml is unmaintained (not vulnerable). It is only used at compile time by askama_derive to read askama's
+  # own configuration, so nothing at run time parses TOML with it. Drop this once askama moves off it.
+  { id = "RUSTSEC-2026-0374", reason = "build-time only, through askama_derive; no maintained askama without it yet" },
+]
 
 [licenses]
 allow = [
