@@ -11,7 +11,9 @@ Jetway is one Rust binary. It speaks Ollama's own API and Ollama's OpenAI-compat
 (.NET, OllamaSharp), BlackBox's OpsDesk agent (Python, `ollama`), the `ollama` CLI and any OpenAI client.
 
 > **Status (2026-10-26):** plan approved; phases 0–4 done, so **the MVP is complete** (pass-through, request log,
-> exact cache, dashboard); phase 5 (real clients) next.
+> exact cache, dashboard). Phase 5 (real clients) is partly done and paused: the PC shut down during its GPU work.
+> Phase 9 (limits) is done, out of order because it needs no GPU; phase 7's code (guards, CPU-only checks) is next,
+> and the GPU work of phases 5, 6 and 8 waits until the PC is stable.
 
 | File | What it covers |
 |---|---|

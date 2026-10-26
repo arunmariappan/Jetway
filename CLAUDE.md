@@ -66,9 +66,15 @@ cargo deny check                              # licences, advisories, duplicates
 - `src/web/`: the admin listener's routes (`mod.rs`), page models and askama templates (`pages.rs`, `templates/`),
   data from the rollups (`views.rs`), SVG charts (`charts.rs`), the SSE live feed (`feed.rs`), embedded assets
   (`assets.rs`, `assets/`), the JSON API (`api.rs`). `src/server/admin.rs`: the admin state.
-- `src/app.rs`: starts and stops everything `serve` runs; tests use it through `tests/common::Stack`.
+- `src/limits/`: phase 9. `rate.rs` (governor per app), `budget.rs` (day/month usage; also a `Sink` that counts
+  upstream calls), `scheduler.rs` (upstream slots, priority queue with aging, shedding), `health.rs` (circuit),
+  `cap.rs` (output cap), `mod.rs` (`AppLimits` with the `[apps.default]` fallback, `Refusal`, `LimitNote`).
+  `src/alerts/`: rules and fire/escalate/resolve state (`mod.rs`), `telegram.rs`. `src/web/limits.rs`: the Limits
+  and Alerts pages and the banner.
+- `src/app.rs`: starts and stops everything `serve` runs (and the probe, queue-sampling, budget-flush and alert
+  tasks); tests use it through `tests/common::Stack`.
 - `tests/common/`: `Harness` (fake + gateway only) and `Stack` (the whole app with a temporary database).
-  `tests/pass_through.rs`: phase 1; `tests/request_log.rs`: phase 2.
+  `tests/pass_through.rs`: phase 1; `tests/request_log.rs`: phase 2; `tests/limits.rs`: phase 9.
 - `jetway.toml`: committed defaults; a test checks it equals `Config::default()`, so change both together.
 - `docs/plan/`: the plan. Later phases add the modules listed in plan §3.
 
@@ -77,8 +83,9 @@ cargo deny check                              # licences, advisories, duplicates
 - Shells and VS Code windows opened before Rust was installed don't have `%USERPROFILE%\.cargo\bin` on PATH; in Git
   Bash prepend `$HOME/.cargo/bin`.
 - `rust-toolchain.toml` pins channel `1.99`, which rustup installs as its own toolchain next to `stable`.
-- reqwest has no TLS feature until phase 9 (Telegram): the upstream is plain HTTP on 127.0.0.1, and TLS pulls in a
-  heavy C build (`aws-lc-sys`).
+- reqwest has the `rustls` feature since phase 9 (Telegram is HTTPS); it builds `aws-lc-sys` (about 40 s here).
+  Don't switch to `rustls-no-provider` + ring: features unify, and every reqwest client in the build (tests too)
+  would then panic unless a crypto provider is installed first.
 - Git here has `core.autocrlf=true`; `.gitattributes` keeps files LF. Python's `Path.write_text` writes CRLF on
   Windows; pass `newline="\n"`.
 - Clippy denies `unwrap`/`expect` outside tests (`clippy.toml` allows them in tests). `figment::Jail` tests need
@@ -104,15 +111,28 @@ cargo deny check                              # licences, advisories, duplicates
 - Streamed and unstreamed versions of the same request share a cache key (`stream` isn't part of it).
 - `jetway.toml` must keep matching `Config::default()` (a test checks); new settings go in both.
 - Fake-Ollama scripts go in the `x-fake-script` request header (JSON); Jetway forwards it like any other header.
-- On Windows a refused loopback connection takes ~2 s (the OS retries), so "Ollama is down" is slow until phase 9's
-  circuit breaker; tests allow for it with `cfg!(windows)`.
+- On Windows a refused loopback connection takes ~2 s (the OS retries), usually ending as a connect timeout. The
+  circuit (phase 9) opens after `health.failures_to_open` failed connects and then refuses in ~1 ms; tests allow
+  for the 2 s with `cfg!(windows)` or a short `connect_timeout_ms`.
+- hyper drops the handler future when a client leaves. Anything the handler must do on that path goes in a `Drop`
+  guard: `CancelGuard` records the exchange (`client_cancelled`, 499), `Lead` fails a flight its joiners wait on,
+  `scheduler::Permit`/`WaitGuard` free or leave the queue. The tee frees its slot when the upstream's part ends.
+- Health probes send `User-Agent: jetway-probe/<version>`; the fake Ollama's `requests()` leaves them out (count
+  them with `probes()`). `Stack` runs the probe task, `Harness` doesn't.
+- Phase 9 order in the handler: rate limit, body, cache hit, join, circuit + budget, lead, output cap, slot,
+  circuit + budget again, upstream. Hits and joined requests never need budget or a slot.
+- Telegram settings come from the environment or `.env` (read directly: `set_var` is unsafe in edition 2024 and
+  unsafe code is forbidden). `Telegram` isn't `Debug`; errors use `without_url()` and mask the token.
 - Integration test files start with `#![allow(clippy::unwrap_used, clippy::expect_used)]`: `clippy.toml`'s test
   allowance covers `#[test]` functions, not helpers.
 - Real clients (phase 5): PaperPilot goes through Jetway with `ConnectionStrings__ollama=Endpoint=http://127.0.0.1:8300/a/paperpilot/`
   (and `Langfuse__Enabled=false`) in the environment of `aspire start`; BlackBox in front with a copy of
   `blackbox.toml` whose `ollama` target is `http://127.0.0.1:8300/a/<app>` (`BLACKBOX_CONFIG=...`, plus
   `PYTHONUTF8=1` when its output is redirected). Stop PaperPilot's docling container for such sessions (2.4 GB).
-- The PC has shut down during GPU work again (2026-10-26, phase 5). No GPU run without the user's go-ahead.
+- The PC has shut down during GPU work again (2026-10-26, phase 5). No GPU run without the user's go-ahead. Phase 9
+  was done first for that reason; phase 7's code with CPU-only checks is next.
+- Headless screenshots without Playwright: `msedge.exe --headless=new --user-data-dir=<scratchpad dir>
+  --window-size=1400,2200 --virtual-time-budget=4000 --screenshot=<scratchpad>/x.png <url>`.
 - Pushing needs the user's GitHub login for this repo's URL (`credential.usehttppath` is on globally, so BlackBox's
   saved login doesn't apply). Don't copy credentials between entries; ask the user to sign in once.
 
