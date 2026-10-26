@@ -108,6 +108,11 @@ cargo deny check                              # licences, advisories, duplicates
   circuit breaker; tests allow for it with `cfg!(windows)`.
 - Integration test files start with `#![allow(clippy::unwrap_used, clippy::expect_used)]`: `clippy.toml`'s test
   allowance covers `#[test]` functions, not helpers.
+- Real clients (phase 5): PaperPilot goes through Jetway with `ConnectionStrings__ollama=Endpoint=http://127.0.0.1:8300/a/paperpilot/`
+  (and `Langfuse__Enabled=false`) in the environment of `aspire start`; BlackBox in front with a copy of
+  `blackbox.toml` whose `ollama` target is `http://127.0.0.1:8300/a/<app>` (`BLACKBOX_CONFIG=...`, plus
+  `PYTHONUTF8=1` when its output is redirected). Stop PaperPilot's docling container for such sessions (2.4 GB).
+- The PC has shut down during GPU work again (2026-10-26, phase 5). No GPU run without the user's go-ahead.
 - Pushing needs the user's GitHub login for this repo's URL (`credential.usehttppath` is on globally, so BlackBox's
   saved login doesn't apply). Don't copy credentials between entries; ask the user to sign in once.
 
