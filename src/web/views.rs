@@ -157,6 +157,8 @@ pub struct Charts {
 }
 
 pub fn tiles(total: &Minute, window: Window) -> Tiles {
+    // Rollups written before the cacheable count existed have hits but no count; never divide by less than them.
+    let looked_at = total.cacheable.max(total.cache_hits + total.cache_joined);
     let tps =
         (!total.tokens_per_second.is_empty()).then(|| total.tokens_per_second.value_at_quantile(0.5) as f64 / 100.0);
     Tiles {
@@ -166,7 +168,7 @@ pub fn tiles(total: &Minute, window: Window) -> Tiles {
         p95_ms: quantile_ms(&total.latency, 0.95),
         ttft_p50_ms: quantile_ms(&total.ttft, 0.5),
         tokens_per_second: tps,
-        cache_hit_rate: (total.cacheable > 0).then(|| total.cache_hits as f64 / total.cacheable as f64),
+        cache_hit_rate: (looked_at > 0).then(|| total.cache_hits as f64 / looked_at as f64),
         error_rate: (total.requests > 0).then(|| errors(total) as f64 / total.requests as f64),
         prompt_tokens: total.prompt_tokens,
         completion_tokens: total.completion_tokens,

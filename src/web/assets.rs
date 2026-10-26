@@ -31,7 +31,7 @@ pub async fn serve(Path(path): Path<String>, headers: HeaderMap) -> Response {
     let mut response = file.data.into_owned().into_response();
     let h = response.headers_mut();
     h.insert(CONTENT_TYPE, HeaderValue::from_static(content_type(&path)));
-    h.insert(CACHE_CONTROL, HeaderValue::from_static("public, max-age=3600"));
+    h.insert(CACHE_CONTROL, HeaderValue::from_static("no-cache"));
     if let Ok(value) = HeaderValue::from_str(&etag) {
         h.insert(ETAG, value);
     }
