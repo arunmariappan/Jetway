@@ -263,7 +263,10 @@ impl Cache {
         // The response's framing must match what the request asked for.
         let stream = f.framing.is_stream();
         let wanted = summary.stream && f.exchange.class == PathClass::Generation;
-        if !complete || stream != wanted {
+        // An answer cut off by the context limit, which the client didn't ask for, is a runaway, not an answer (seen
+        // in phase 5: a rewrite step generated 16 283 tokens); only a requested cap makes truncation the answer.
+        let runaway = f.summary.done_reason.as_deref() == Some("length") && summary.max_tokens.is_none();
+        if !complete || stream != wanted || runaway {
             return None;
         }
         let mut raw = f.response.clone();

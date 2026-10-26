@@ -377,3 +377,21 @@ async fn joined_unstreamed_requests_end_ok() {
         records.iter().map(|r| r.outcome).collect::<Vec<_>>()
     );
 }
+
+#[tokio::test]
+async fn answers_cut_off_by_length_are_cached_only_when_the_client_set_a_cap() {
+    let stack = cache_on().await;
+    // The recorded /v1/completions stream ends with finish_reason "length".
+    let uncapped = json!({"model": "qwen3.5:4b", "prompt": "hi", "stream": true});
+    stack.post("/v1/completions", uncapped.clone()).send().await.unwrap().bytes().await.unwrap();
+    stack.records.wait_for(1).await;
+    let again = stack.post("/v1/completions", uncapped).send().await.unwrap();
+    assert_eq!(again.headers()["x-jetway-cache"], "miss", "a runaway isn't an answer worth keeping");
+    again.bytes().await.unwrap();
+
+    let capped = json!({"model": "qwen3.5:4b", "prompt": "hi", "stream": true, "max_tokens": 24});
+    stack.post("/v1/completions", capped.clone()).send().await.unwrap().bytes().await.unwrap();
+    stack.records.wait_for(3).await;
+    let again = stack.post("/v1/completions", capped).send().await.unwrap();
+    assert_eq!(again.headers()["x-jetway-cache"], "hit", "the client asked for at most 24 tokens");
+}
