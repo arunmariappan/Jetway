@@ -11,6 +11,9 @@ use hdrhistogram::Histogram;
 use hdrhistogram::serialization::{Deserializer, Serializer, V2Serializer};
 
 use crate::cache::CacheResult;
+use crate::config::Priority;
+use crate::limits::Refusal;
+use crate::limits::scheduler::Depth;
 use crate::proxy::record::{Finished, Outcome};
 use crate::store::RollupRow;
 
@@ -22,6 +25,10 @@ const LATENCY_BUCKETS: [f64; 15] =
     [0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0, 30.0, 60.0, 120.0, 300.0];
 /// Prometheus buckets for Jetway's own time before the upstream call, in seconds.
 const ADDED_BUCKETS: [f64; 9] = [0.000_05, 0.000_1, 0.000_25, 0.000_5, 0.001, 0.002_5, 0.005, 0.01, 0.05];
+/// Prometheus buckets for the wait for an upstream slot, in seconds.
+const QUEUE_BUCKETS: [f64; 12] = [0.001, 0.01, 0.1, 0.5, 1.0, 2.5, 5.0, 10.0, 30.0, 60.0, 120.0, 900.0];
+/// Ollama's `load_duration` above this marks a model load (a cold start).
+pub const MODEL_LOAD_NS: u64 = 1_000_000_000;
 
 fn histogram() -> Histogram<u64> {
     // Microseconds from 1 µs to one hour, two significant figures; `saturating_record` clamps anything beyond.
@@ -49,6 +56,10 @@ pub struct Minute {
     pub added: Histogram<u64>,
     /// Output tokens per second, ×100.
     pub tokens_per_second: Histogram<u64>,
+    /// The wait for an upstream slot, microseconds (phase 9).
+    pub queue_wait: Histogram<u64>,
+    /// Upstream calls whose model had to be loaded first.
+    pub model_loads: u64,
 }
 
 impl Default for Minute {
@@ -67,6 +78,8 @@ impl Default for Minute {
             ttft: histogram(),
             added: histogram(),
             tokens_per_second: histogram(),
+            queue_wait: histogram(),
+            model_loads: 0,
         }
     }
 }
@@ -92,6 +105,8 @@ impl Minute {
         let _ = self.ttft.add(&other.ttft);
         let _ = self.added.add(&other.added);
         let _ = self.tokens_per_second.add(&other.tokens_per_second);
+        let _ = self.queue_wait.add(&other.queue_wait);
+        self.model_loads += other.model_loads;
     }
 }
 
@@ -137,6 +152,9 @@ struct State {
     cache: HashMap<(String, CacheResult), u64>,
     saved_tokens: HashMap<String, u64>,
     saved_gpu_ms: HashMap<String, u64>,
+    refusals: HashMap<(String, Refusal), u64>,
+    queue_wait: HashMap<Priority, Buckets>,
+    model_loads: HashMap<Key, u64>,
     incomplete: u64,
     truncated: u64,
     /// Minutes already written to the store and not changed since.
@@ -159,6 +177,8 @@ pub struct Gauges {
     pub cache_entries: u64,
     pub cache_bytes: u64,
     pub flights: usize,
+    pub queue: Depth,
+    pub circuit_open: bool,
 }
 
 fn micros(d: Option<Duration>) -> Option<u64> {
@@ -179,7 +199,11 @@ impl Metrics {
         let completion = f.summary.completion_tokens.unwrap_or(0);
         let latency = micros(f.timings.done);
         let ttft = micros(f.timings.first_token);
-        let added = micros(f.timings.upstream_sent);
+        // Jetway's own time: before the upstream call, less the wait for a slot.
+        let added =
+            micros(f.timings.upstream_sent.map(|sent| sent.saturating_sub(f.timings.queue_wait.unwrap_or_default())));
+        let queue_wait = micros(f.timings.queue_wait);
+        let model_load = f.summary.load_ns.is_some_and(|ns| ns > MODEL_LOAD_NS);
         // Ollama's own generation rate when it reports one, otherwise the rate the client saw after the first token.
         let generation =
             f.summary.eval_ns.map(Duration::from_nanos).or_else(|| match (f.timings.first_token, f.timings.done) {
@@ -206,11 +230,13 @@ impl Metrics {
         entry.cache_joined += u64::from(cache_result == Some(CacheResult::Joined));
         entry.saved_tokens += saved_tokens;
         entry.saved_gpu_ms += saved_gpu_ms;
+        entry.model_loads += u64::from(model_load);
         for (histogram, value) in [
             (&mut entry.latency, latency),
             (&mut entry.ttft, ttft),
             (&mut entry.added, added),
             (&mut entry.tokens_per_second, tps),
+            (&mut entry.queue_wait, queue_wait),
         ] {
             if let Some(value) = value {
                 histogram.saturating_record(value.max(1));
@@ -226,6 +252,16 @@ impl Metrics {
             *state.cache.entry((app.clone(), result)).or_default() += 1;
             *state.saved_tokens.entry(app.clone()).or_default() += saved_tokens;
             *state.saved_gpu_ms.entry(app.clone()).or_default() += saved_gpu_ms;
+        }
+        if let Some(refusal) = f.exchange.limits.refusal {
+            *state.refusals.entry((app.clone(), refusal)).or_default() += 1;
+        }
+        if let Some(us) = queue_wait {
+            let class = f.exchange.limits.priority;
+            state.queue_wait.entry(class).or_insert_with(|| Buckets::new(&QUEUE_BUCKETS)).observe(us as f64 / 1e6);
+        }
+        if model_load {
+            *state.model_loads.entry((app.clone(), model.clone())).or_default() += 1;
         }
         *state.tokens.entry((app.clone(), model.clone(), "prompt")).or_default() += prompt;
         *state.tokens.entry((app.clone(), model.clone(), "completion")).or_default() += completion;
@@ -256,6 +292,14 @@ impl Metrics {
             }
         }
         merged
+    }
+
+    /// Refusals by limits since start: `(app, reason, count)`.
+    pub fn refusals(&self) -> Vec<(String, Refusal, u64)> {
+        let state = self.lock();
+        let mut rows: Vec<_> = state.refusals.iter().map(|((app, reason), n)| (app.clone(), *reason, *n)).collect();
+        rows.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.as_str().cmp(b.1.as_str())));
+        rows
     }
 
     /// The apps seen in `[from_ms, to_ms)`, sorted.
@@ -310,6 +354,8 @@ impl Metrics {
                 ttft: read(&r.ttft),
                 added: read(&r.added),
                 tokens_per_second: read(&r.tokens_per_second),
+                queue_wait: if r.queue_wait.is_empty() { histogram() } else { read(&r.queue_wait) },
+                model_loads: count(r.model_loads),
             };
             state.minutes.insert(key, minute);
         }
@@ -409,6 +455,45 @@ impl Metrics {
             }
         }
 
+        out.push_str("# HELP jetway_refused_total Requests refused by a limit (phase 9), by app and reason.\n");
+        out.push_str("# TYPE jetway_refused_total counter\n");
+        let mut refusals: Vec<_> = state.refusals.iter().collect();
+        refusals.sort_by(|a, b| a.0.0.cmp(&b.0.0).then(a.0.1.as_str().cmp(b.0.1.as_str())));
+        for ((app, reason), n) in refusals {
+            let _ = writeln!(out, "jetway_refused_total{{app=\"{}\",reason=\"{}\"}} {n}", label(app), reason.as_str());
+        }
+        out.push_str("# HELP jetway_model_loads_total Upstream calls that had to load their model first.\n");
+        out.push_str("# TYPE jetway_model_loads_total counter\n");
+        let mut loads: Vec<_> = state.model_loads.iter().collect();
+        loads.sort();
+        for ((app, model), n) in loads {
+            let _ = writeln!(out, "jetway_model_loads_total{{app=\"{}\",model=\"{}\"}} {n}", label(app), label(model));
+        }
+        let name = "jetway_queue_wait_seconds";
+        let _ =
+            writeln!(out, "# HELP {name} The wait for an upstream slot, by priority class.\n# TYPE {name} histogram");
+        for class in Priority::ALL {
+            if let Some(buckets) = state.queue_wait.get(&class) {
+                let labels = format!("class=\"{}\"", class.as_str());
+                for (bound, count) in buckets.bounds.iter().zip(&buckets.counts) {
+                    let _ = writeln!(out, "{name}_bucket{{{labels},le=\"{bound}\"}} {count}");
+                }
+                let _ = writeln!(out, "{name}_bucket{{{labels},le=\"+Inf\"}} {}", buckets.count);
+                let _ = writeln!(out, "{name}_sum{{{labels}}} {}", buckets.sum);
+                let _ = writeln!(out, "{name}_count{{{labels}}} {}", buckets.count);
+            }
+        }
+        let name = "jetway_queue_depth";
+        let _ = writeln!(
+            out,
+            "# HELP {name} Requests waiting for an upstream slot, by priority class.\n# TYPE {name} gauge"
+        );
+        for (class, n) in
+            [("interactive", gauges.queue.interactive), ("normal", gauges.queue.normal), ("batch", gauges.queue.batch)]
+        {
+            let _ = writeln!(out, "{name}{{class=\"{class}\"}} {n}");
+        }
+
         let counters = [
             ("jetway_log_dropped_total", "Records dropped because the store's queue was full.", gauges.log_dropped),
             ("jetway_log_write_errors_total", "Store batches that failed to write.", gauges.log_write_errors),
@@ -425,6 +510,13 @@ impl Metrics {
             ("jetway_cache_entries", "Cache entries held in memory.", gauges.cache_entries as f64),
             ("jetway_cache_memory_bytes", "Memory the cache's entries use.", gauges.cache_bytes as f64),
             ("jetway_flights", "Upstream calls that identical requests can join.", gauges.flights as f64),
+            ("jetway_upstream_slots", "Requests the upstream may run at once.", gauges.queue.slots as f64),
+            ("jetway_upstream_slots_in_use", "Upstream slots in use.", gauges.queue.in_use as f64),
+            (
+                "jetway_circuit_open",
+                "1 while the upstream is down and requests fail fast.",
+                f64::from(u8::from(gauges.circuit_open)),
+            ),
         ];
         for (name, help, value) in gauge_values {
             let _ = writeln!(out, "# HELP {name} {help}\n# TYPE {name} gauge\n{name} {value}");
@@ -462,6 +554,8 @@ fn to_row(minute: i64, app: &str, model: &str, m: &Minute) -> RollupRow {
         ttft: serialize(&m.ttft),
         added: serialize(&m.added),
         tokens_per_second: serialize(&m.tokens_per_second),
+        queue_wait: serialize(&m.queue_wait),
+        model_loads: int(m.model_loads),
     }
 }
 
@@ -505,6 +599,7 @@ mod tests {
                 traceparent: None,
                 spans: None,
                 cache: None,
+                limits: crate::limits::LimitNote::default(),
             },
             status: 200,
             outcome,

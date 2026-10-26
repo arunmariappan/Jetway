@@ -321,6 +321,7 @@ pub fn inflight(admin: &Admin) -> InflightFragment {
 #[template(path = "status.html")]
 pub struct StatusFragment {
     pub up: bool,
+    pub circuit_open: bool,
     pub upstream: String,
     pub version: String,
     pub in_flight: usize,
@@ -371,7 +372,11 @@ fn timeline(row: &ExchangeRow) -> String {
     let mut phases: Vec<(&str, i64, i64)> = Vec::new();
     let sent = row.upstream_sent_us;
     if let Some(sent) = sent {
-        phases.push(("Jetway, before the upstream", 0, sent));
+        let waited = row.queue_wait_us.unwrap_or(0).clamp(0, sent);
+        if waited > 0 {
+            phases.push(("Waiting for an upstream slot", 0, waited));
+        }
+        phases.push(("Jetway, before the upstream", waited, sent));
         let answered = row.headers_us.unwrap_or(sent);
         phases.push(("Waiting for the upstream", sent, answered));
         if let Some(first) = row.first_token_us {
@@ -431,6 +436,15 @@ pub fn exchange_page(row: &ExchangeRow, bodies: Option<&Bodies>) -> ExchangePage
             format!("{} / {}", compact(row.request_bytes as f64), compact(row.response_bytes as f64)),
         ),
     ];
+    if let Some(priority) = &row.priority {
+        fields.push(("Priority".to_string(), priority.clone()));
+    }
+    if let Some(refusal) = &row.refusal {
+        fields.push(("Refused by".to_string(), refusal.replace('_', " ")));
+    }
+    if let Some(cap) = row.output_cap {
+        fields.push(("Output cap added".to_string(), format!("{cap} tokens")));
+    }
     if let Some(error) = &row.error {
         fields.push(("Error".to_string(), error.clone()));
     }
@@ -442,6 +456,7 @@ pub fn exchange_page(row: &ExchangeRow, bodies: Option<&Bodies>) -> ExchangePage
     }
     let ns_ms = |ns: Option<i64>| views::ms(ns.map(|ns| ns as f64 / 1e6));
     let timings = vec![
+        ("Waited for a slot".to_string(), us_ms(row.queue_wait_us)),
         ("Sent upstream".to_string(), us_ms(row.upstream_sent_us)),
         ("Headers".to_string(), us_ms(row.headers_us)),
         ("First byte".to_string(), us_ms(row.first_chunk_us)),

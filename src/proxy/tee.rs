@@ -14,6 +14,7 @@ use super::errors;
 use super::inflight::InflightGuard;
 use super::record::{End, Outcome, Recorder, Timings};
 use super::usage::UsageFilter;
+use crate::limits::scheduler::Permit;
 use crate::protocol::{Framing, Protocol};
 
 pub struct TeeBody {
@@ -37,6 +38,8 @@ pub struct TeeBody {
     /// The upstream has ended; the next poll finishes the exchange.
     upstream_done: bool,
     recorder: Option<Recorder>,
+    /// The upstream slot (phase 9), freed as soon as the upstream's part ends rather than when the body is dropped.
+    slot: Option<Permit>,
     _inflight: InflightGuard,
 }
 
@@ -51,6 +54,7 @@ pub struct TeeParts {
     pub expected_len: Option<u64>,
     pub usage_filter: Option<UsageFilter>,
     pub recorder: Recorder,
+    pub slot: Option<Permit>,
     pub inflight: InflightGuard,
 }
 
@@ -72,6 +76,7 @@ impl TeeBody {
             usage_filter: parts.usage_filter,
             upstream_done: false,
             recorder: Some(parts.recorder),
+            slot: parts.slot,
             _inflight: parts.inflight,
         };
         if tee.expected_len == Some(0) {
@@ -108,6 +113,7 @@ impl TeeBody {
 
     /// Ends the exchange once; later calls do nothing.
     fn finish(&mut self, outcome: Outcome, error: Option<String>) {
+        self.slot = None;
         if let Some(recorder) = self.recorder.take() {
             self.timings.done = Some(self.started.elapsed());
             recorder.end(End {

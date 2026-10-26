@@ -86,6 +86,10 @@ struct Log {
 #[derive(Clone, Default)]
 pub struct Events(Arc<Mutex<Log>>);
 
+fn is_probe(headers: &HeaderMap) -> bool {
+    headers.get("user-agent").and_then(|v| v.to_str().ok()).is_some_and(|ua| ua.starts_with(crate::server::PROBE_AGENT))
+}
+
 impl Events {
     fn push(&self, event: Event) {
         self.0.lock().unwrap_or_else(PoisonError::into_inner).events.push(event);
@@ -101,15 +105,23 @@ impl Events {
         self.0.lock().unwrap_or_else(PoisonError::into_inner).events.clone()
     }
 
-    /// The requests received, oldest first: `(id, method, path, headers, body)`.
+    /// The requests received for clients, oldest first: `(id, method, path, headers, body)`. Jetway's health probes
+    /// are left out; [`Events::probes`] counts them.
     pub fn requests(&self) -> Vec<(usize, Method, String, HeaderMap, Bytes)> {
         self.all()
             .into_iter()
             .filter_map(|e| match e {
-                Event::Request { id, method, path, headers, body, .. } => Some((id, method, path, headers, body)),
+                Event::Request { id, method, path, headers, body, .. } if !is_probe(&headers) => {
+                    Some((id, method, path, headers, body))
+                }
                 _ => None,
             })
             .collect()
+    }
+
+    /// Jetway's health probes received.
+    pub fn probes(&self) -> usize {
+        self.all().iter().filter(|e| matches!(e, Event::Request { headers, .. } if is_probe(headers))).count()
     }
 
     pub fn chunks_sent(&self, id: usize) -> Vec<(Instant, Bytes)> {

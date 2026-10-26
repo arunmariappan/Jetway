@@ -5,6 +5,7 @@ pub mod api;
 pub mod assets;
 pub mod charts;
 pub mod feed;
+pub mod limits;
 pub mod pages;
 pub mod views;
 
@@ -63,6 +64,9 @@ pub fn router(admin: Arc<Admin>) -> Router {
         .route("/apps", get(apps))
         .route("/cache", get(cache))
         .route("/cache/clear", post(cache_clear))
+        .route("/limits", get(limits_page))
+        .route("/alerts", get(alerts_page))
+        .route("/fragments/alerts", get(banner))
         .route("/assets/{*path}", get(assets::serve))
         .route("/metrics", get(prometheus))
         .route("/healthz", get(|| async { "ok" }))
@@ -90,9 +94,10 @@ async fn overview_fragment(State(admin): State<Arc<Admin>>, Query(params): Query
 }
 
 async fn status(State(admin): State<Arc<Admin>>) -> Response {
-    let status = admin.upstream_status().await;
+    let status = admin.upstream_status();
     html(&pages::StatusFragment {
         up: status.up,
+        circuit_open: status.circuit_open,
         upstream: admin.gateway.upstream_name().to_string(),
         version: status.version.unwrap_or_default(),
         in_flight: admin.gateway.inflight(),
@@ -201,6 +206,18 @@ async fn cache_clear(State(admin): State<Arc<Admin>>, headers: HeaderMap, Form(f
     } else {
         (StatusCode::SEE_OTHER, [(LOCATION, HeaderValue::from_static("/cache"))]).into_response()
     }
+}
+
+async fn limits_page(State(admin): State<Arc<Admin>>, Query(params): Query<Params>) -> Response {
+    html(&limits::limits_page(&admin, params.window(), now_ms()))
+}
+
+async fn alerts_page(State(admin): State<Arc<Admin>>) -> Response {
+    html(&limits::alerts_page(&admin))
+}
+
+async fn banner(State(admin): State<Arc<Admin>>) -> Response {
+    html(&limits::banner(&admin))
 }
 
 async fn prometheus(State(admin): State<Arc<Admin>>) -> impl IntoResponse {

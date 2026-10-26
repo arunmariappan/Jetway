@@ -1,0 +1,21 @@
+{% extends "base.html" %}
+{% block content %}
+<h1>Alerts</h1>
+<p class="sub">{% if !enabled %}Alerts are off (alerts.enabled = false).{% else %}Checked every 15 seconds: budgets at 80% and 100%, an app's error rate and first-token p95 over 5 minutes, the upstream, and records the request log dropped. {% if telegram %}Sent to Telegram when they fire, escalate or resolve, at most once per cooldown.{% else %}Telegram is off (alerts.telegram = false).{% endif %}{% endif %}</p>
+<div class="stack">
+<section class="card">
+  <h2>Active</h2>
+  {% if active.is_empty() %}<p class="empty">Nothing needs attention.</p>{% else %}
+  <table class="data"><thead><tr><th>Severity</th><th>Alert</th><th>Since</th><th>Sent</th></tr></thead>
+  <tbody>{% for a in active %}<tr><td><span class="badge {{ a.badge }}">{{ a.severity }}</span></td><td class="wrap">{{ a.message }}</td><td>{{ a.since }}</td><td>{% if a.notified %}yes{% else %}no{% endif %}</td></tr>{% endfor %}</tbody></table>
+  {% endif %}
+</section>
+<section class="card">
+  <h2>Resolved</h2>
+  {% if resolved.is_empty() %}<p class="empty">None yet.</p>{% else %}
+  <div class="scroll"><table class="data"><thead><tr><th>Severity</th><th>Alert</th><th>From</th><th>To</th></tr></thead>
+  <tbody>{% for a in resolved %}<tr><td><span class="badge {{ a.badge }}">{{ a.severity }}</span></td><td class="wrap">{{ a.message }}</td><td>{{ a.since }}</td><td>{{ a.resolved }}</td></tr>{% endfor %}</tbody></table></div>
+  {% endif %}
+</section>
+</div>
+{% endblock %}

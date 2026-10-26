@@ -5,6 +5,7 @@ use std::time::Duration;
 use rusqlite::{Connection, OptionalExtension, Row, params};
 
 use super::ListFilter;
+use crate::limits::budget::{Period, Usage, UsageRow};
 use crate::proxy::record::Finished;
 
 /// One exchange as stored (plan phase 2.2).
@@ -55,6 +56,10 @@ pub struct ExchangeRow {
     pub incomplete: bool,
     /// JSON: what the cache did ([`crate::cache::CacheNote`]).
     pub cache: Option<String>,
+    pub priority: Option<String>,
+    /// Why a limit refused it ([`crate::limits::Refusal`]).
+    pub refusal: Option<String>,
+    pub output_cap: Option<i64>,
 }
 
 fn us(d: Option<Duration>) -> Option<i64> {
@@ -109,7 +114,7 @@ impl ExchangeRow {
             first_token_us: us(t.first_token),
             first_thinking_us: us(t.first_thinking),
             done_us: us(t.done),
-            queue_wait_us: None,
+            queue_wait_us: us(t.queue_wait),
             prompt_tokens: int(response.prompt_tokens),
             completion_tokens: int(response.completion_tokens),
             cached_prompt_tokens: int(response.cached_prompt_tokens),
@@ -124,6 +129,9 @@ impl ExchangeRow {
             truncated: f.truncated,
             incomplete: f.incomplete,
             cache: f.exchange.cache.as_ref().map(crate::cache::CacheNote::to_json),
+            priority: Some(f.exchange.limits.priority.as_str().to_string()),
+            refusal: f.exchange.limits.refusal.map(|r| r.as_str().to_string()),
+            output_cap: f.exchange.limits.output_cap.map(i64::from),
         }
     }
 }
@@ -132,14 +140,14 @@ const COLUMNS: &str = "id, started_at, app, protocol, method, path, class, model
     seed, max_tokens, messages, has_images, has_tools, has_format, status, outcome, error, request_bytes, response_bytes,
     upstream_sent_us, headers_us, first_chunk_us, first_token_us, first_thinking_us, done_us, queue_wait_us,
     prompt_tokens, completion_tokens, cached_prompt_tokens, load_ns, prompt_eval_ns, eval_ns, total_ns, done_reason,
-    response_model, trace_id, parent_span_id, truncated, incomplete, cache";
+    response_model, trace_id, parent_span_id, truncated, incomplete, cache, priority, refusal, output_cap";
 
 pub fn insert(connection: &Connection, r: &ExchangeRow) -> rusqlite::Result<()> {
     connection.execute(
         &format!(
             "INSERT OR REPLACE INTO exchanges ({COLUMNS}) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13,
              ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26, ?27, ?28, ?29, ?30, ?31, ?32, ?33, ?34,
-             ?35, ?36, ?37, ?38, ?39, ?40, ?41, ?42, ?43, ?44)"
+             ?35, ?36, ?37, ?38, ?39, ?40, ?41, ?42, ?43, ?44, ?45, ?46, ?47)"
         ),
         params![
             r.id,
@@ -186,6 +194,9 @@ pub fn insert(connection: &Connection, r: &ExchangeRow) -> rusqlite::Result<()> 
             r.truncated,
             r.incomplete,
             r.cache,
+            r.priority,
+            r.refusal,
+            r.output_cap,
         ],
     )?;
     Ok(())
@@ -237,6 +248,9 @@ fn from_row(row: &Row<'_>) -> rusqlite::Result<ExchangeRow> {
         truncated: row.get(41)?,
         incomplete: row.get(42)?,
         cache: row.get(43)?,
+        priority: row.get(44)?,
+        refusal: row.get(45)?,
+        output_cap: row.get(46)?,
     })
 }
 
@@ -313,14 +327,17 @@ pub struct RollupRow {
     pub ttft: Vec<u8>,
     pub added: Vec<u8>,
     pub tokens_per_second: Vec<u8>,
+    /// Empty for minutes written before phase 9.
+    pub queue_wait: Vec<u8>,
+    pub model_loads: i64,
 }
 
 pub fn upsert_rollup(connection: &Connection, r: &RollupRow) -> rusqlite::Result<()> {
     connection.execute(
         "INSERT OR REPLACE INTO rollups_minute (minute, app, model, requests, ok, upstream_errors, cancelled, timeouts,
          rejected, prompt_tokens, completion_tokens, latency, ttft, added, tokens_per_second, cache_hits,
-         cache_joined, saved_tokens, saved_gpu_ms, cacheable)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20)",
+         cache_joined, saved_tokens, saved_gpu_ms, cacheable, queue_wait, model_loads)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22)",
         params![
             r.minute_ms,
             r.app,
@@ -341,7 +358,9 @@ pub fn upsert_rollup(connection: &Connection, r: &RollupRow) -> rusqlite::Result
             r.cache_joined,
             r.saved_tokens,
             r.saved_gpu_ms,
-            r.cacheable
+            r.cacheable,
+            r.queue_wait,
+            r.model_loads
         ],
     )?;
     Ok(())
@@ -351,7 +370,7 @@ pub fn rollups_since(connection: &Connection, since_ms: i64) -> rusqlite::Result
     let mut statement = connection.prepare(
         "SELECT minute, app, model, requests, ok, upstream_errors, cancelled, timeouts, rejected, prompt_tokens,
          completion_tokens, latency, ttft, added, tokens_per_second, cache_hits, cache_joined, saved_tokens,
-         saved_gpu_ms, cacheable FROM rollups_minute WHERE minute >= ?1 ORDER BY minute",
+         saved_gpu_ms, cacheable, queue_wait, model_loads FROM rollups_minute WHERE minute >= ?1 ORDER BY minute",
     )?;
     statement
         .query_map([since_ms], |row| {
@@ -376,9 +395,52 @@ pub fn rollups_since(connection: &Connection, since_ms: i64) -> rusqlite::Result
                 saved_tokens: row.get(17)?,
                 saved_gpu_ms: row.get(18)?,
                 cacheable: row.get(19)?,
+                queue_wait: row.get::<_, Option<Vec<u8>>>(20)?.unwrap_or_default(),
+                model_loads: row.get(21)?,
             })
         })?
         .collect()
+}
+
+/// Writes current budget usage, replacing what was stored for the same app and period.
+pub fn upsert_budget(connection: &Connection, r: &UsageRow, at_ms: i64) -> rusqlite::Result<()> {
+    let int = |n: u64| i64::try_from(n).unwrap_or(i64::MAX);
+    connection.execute(
+        "INSERT OR REPLACE INTO budget_usage (app, period, key, requests, tokens, gpu_ms, updated_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+        params![
+            r.app,
+            r.period.as_str(),
+            r.key,
+            int(r.usage.requests),
+            int(r.usage.tokens),
+            int(r.usage.gpu_ms),
+            at_ms
+        ],
+    )?;
+    Ok(())
+}
+
+/// Stored usage for the given day and month keys.
+pub fn budgets_for(connection: &Connection, day: &str, month: &str) -> rusqlite::Result<Vec<UsageRow>> {
+    let mut statement = connection.prepare(
+        "SELECT app, period, key, requests, tokens, gpu_ms FROM budget_usage
+         WHERE (period = 'day' AND key = ?1) OR (period = 'month' AND key = ?2) ORDER BY app, period",
+    )?;
+    let count = |n: i64| u64::try_from(n).unwrap_or(0);
+    let rows = statement.query_map([day, month], |row| {
+        let period: String = row.get(1)?;
+        Ok((row.get::<_, String>(0)?, period, row.get::<_, String>(2)?, row.get(3)?, row.get(4)?, row.get(5)?))
+    })?;
+    let mut usage = Vec::new();
+    for row in rows {
+        let (app, period, key, requests, tokens, gpu_ms) = row?;
+        if let Some(period) = Period::parse(&period) {
+            let usage_row = Usage { requests: count(requests), tokens: count(tokens), gpu_ms: count(gpu_ms) };
+            usage.push(UsageRow { app, period, key, usage: usage_row });
+        }
+    }
+    Ok(usage)
 }
 
 #[cfg(test)]

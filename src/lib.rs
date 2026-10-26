@@ -1,9 +1,11 @@
 //! Jetway: an LLM gateway in front of Ollama. See `docs/plan/README.md` for the design.
 
+pub mod alerts;
 pub mod app;
 pub mod cache;
 pub mod config;
 pub mod dev;
+pub mod limits;
 pub mod metrics;
 pub mod protocol;
 pub mod proxy;

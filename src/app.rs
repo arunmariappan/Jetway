@@ -1,5 +1,6 @@
 //! Everything `jetway serve` runs, started together and stopped together: the gateway and admin listeners, the
-//! store, metrics and optional span export, and the background tasks that write rollups and apply retention.
+//! store, metrics and optional span export, and the background tasks that write rollups and budgets, apply
+//! retention, probe the upstream, sample the queue and evaluate alerts.
 
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -9,8 +10,10 @@ use tokio::net::TcpListener;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
+use crate::alerts::telegram::Telegram;
+use crate::alerts::{self, Alerts, Inputs};
 use crate::config::Config;
-use crate::metrics::Metrics;
+use crate::metrics::{Metrics, Minute};
 use crate::proxy::record::{Sink, Sinks};
 use crate::server::admin::Admin;
 use crate::server::{self, Gateway};
@@ -20,6 +23,8 @@ use crate::telemetry::Telemetry;
 use crate::web::feed::Feed;
 
 const ROLLUP_EVERY: Duration = Duration::from_secs(15);
+const QUEUE_SAMPLE_EVERY: Duration = Duration::from_secs(10);
+const ALERTS_EVERY: Duration = Duration::from_secs(15);
 const PRUNE_EVERY: Duration = Duration::from_secs(3600);
 const DAY_MS: i64 = 24 * 3600 * 1000;
 
@@ -39,6 +44,7 @@ pub struct Running {
     pub gateway: Arc<Gateway>,
     pub store: Arc<Store>,
     pub metrics: Arc<Metrics>,
+    pub alerts: Arc<Alerts>,
     token: CancellationToken,
     servers: Vec<JoinHandle<std::io::Result<()>>>,
     tasks: Vec<JoinHandle<()>>,
@@ -76,7 +82,20 @@ pub async fn start(
     }
     sinks.extend(extra);
     let gateway = Gateway::new(config.clone(), Arc::new(Sinks(sinks)), Some(Arc::clone(&store)))?;
-    let admin = Arc::new(Admin::new(Arc::clone(&gateway), Arc::clone(&metrics), Some(Arc::clone(&store)), feed));
+    // Budgets carry on from where they were before a restart.
+    let (day, month) = gateway.budgets().current_keys(jiff::Timestamp::now());
+    match store.budgets_for(day, month).await {
+        Ok(rows) => gateway.budgets().restore(rows),
+        Err(error) => tracing::warn!(%error, "couldn't restore budget usage"),
+    }
+    let alerts = Arc::new(Alerts::new(config.alerts.cooldown_minutes));
+    let admin = Arc::new(Admin::new(
+        Arc::clone(&gateway),
+        Arc::clone(&metrics),
+        Some(Arc::clone(&store)),
+        feed,
+        Arc::clone(&alerts),
+    ));
 
     let token = CancellationToken::new();
     let servers = vec![
@@ -85,16 +104,79 @@ pub async fn start(
     ];
 
     let rollups = {
-        let (token, store, metrics) = (token.clone(), Arc::clone(&store), Arc::clone(&metrics));
+        let (token, store, metrics, gateway) =
+            (token.clone(), Arc::clone(&store), Arc::clone(&metrics), Arc::clone(&gateway));
         tokio::spawn(async move {
             loop {
                 tokio::select! {
                     () = token.cancelled() => return,
-                    () = tokio::time::sleep(ROLLUP_EVERY) => store.write_rollups(metrics.take_closed(now_ms())),
+                    () = tokio::time::sleep(ROLLUP_EVERY) => {
+                        store.write_rollups(metrics.take_closed(now_ms()));
+                        store.write_budgets(gateway.budgets().rows(jiff::Timestamp::now()));
+                    }
                 }
             }
         })
     };
+    let probe = {
+        let (token, gateway) = (token.clone(), Arc::clone(&gateway));
+        let every = Duration::from_secs(config.health.probe_seconds);
+        tokio::spawn(async move {
+            loop {
+                match gateway.probe_upstream().await {
+                    Ok(version) => gateway.health().success(version),
+                    Err(error) => gateway.health().failure(&error),
+                }
+                tokio::select! {
+                    () = token.cancelled() => return,
+                    () = tokio::time::sleep(every) => {}
+                }
+            }
+        })
+    };
+    let queue = {
+        let (token, gateway) = (token.clone(), Arc::clone(&gateway));
+        tokio::spawn(async move {
+            loop {
+                tokio::select! {
+                    () = token.cancelled() => return,
+                    () = tokio::time::sleep(QUEUE_SAMPLE_EVERY) => gateway.scheduler().sample(now_ms()),
+                }
+            }
+        })
+    };
+    let alerting = config.alerts.enabled.then(|| {
+        let telegram = if config.alerts.telegram {
+            match Telegram::from_env(&config.alerts.telegram_api) {
+                Ok(telegram) => Some(telegram),
+                Err(reason) => {
+                    tracing::warn!(%reason, "alerts.telegram is on, but alerts won't be sent");
+                    None
+                }
+            }
+        } else {
+            None
+        };
+        let (token, gateway, metrics, store, alerts) =
+            (token.clone(), Arc::clone(&gateway), Arc::clone(&metrics), Arc::clone(&store), Arc::clone(&alerts));
+        tokio::spawn(async move {
+            loop {
+                tokio::select! {
+                    () = token.cancelled() => return,
+                    () = tokio::time::sleep(ALERTS_EVERY) => {}
+                }
+                let notices = evaluate_alerts(&gateway, &metrics, &store, &alerts);
+                for notice in notices {
+                    tracing::warn!(alert = %notice, "alert");
+                    if let Some(telegram) = &telegram
+                        && let Err(error) = telegram.send(&notice).await
+                    {
+                        tracing::warn!(%error, "couldn't send an alert to Telegram");
+                    }
+                }
+            }
+        })
+    });
     let retention = {
         let (token, store) = (token.clone(), Arc::clone(&store));
         let (days, rollup_days) =
@@ -118,7 +200,38 @@ pub async fn start(
         })
     };
 
-    Ok(Running { gateway_addr, admin_addr, gateway, store, metrics, token, servers, tasks: vec![rollups, retention] })
+    let mut tasks = vec![rollups, retention, probe, queue];
+    tasks.extend(alerting);
+    Ok(Running { gateway_addr, admin_addr, gateway, store, metrics, alerts, token, servers, tasks })
+}
+
+/// One evaluation of the alert rules; returns the notifications to send.
+pub fn evaluate_alerts(gateway: &Gateway, metrics: &Metrics, store: &Store, alerts: &Alerts) -> Vec<String> {
+    let now = now_ms();
+    let from = now - alerts::WINDOW_MS;
+    let recent: Vec<(String, Minute)> = metrics
+        .apps(from, now + 1)
+        .into_iter()
+        .map(|app| {
+            let mut merged = Minute::default();
+            for minute in metrics.minutes(from, now + 1, Some(&app)).values() {
+                merged.merge(minute);
+            }
+            (app, merged)
+        })
+        .collect();
+    let budgets = gateway.budgets().rows(jiff::Timestamp::now());
+    let upstream = gateway.health().status();
+    let inputs = Inputs {
+        config: gateway.config(),
+        recent: &recent,
+        budgets: &budgets,
+        upstream: &upstream,
+        upstream_name: gateway.upstream_name(),
+        log_dropped: store.counters.dropped.load(std::sync::atomic::Ordering::Relaxed),
+    };
+    let firing = alerts.evaluate(&inputs, now);
+    alerts.apply(firing, now)
 }
 
 impl Running {
@@ -143,6 +256,7 @@ impl Running {
         // Recorders finish just after their streams; give the last ones a moment.
         tokio::time::sleep(Duration::from_millis(50)).await;
         self.store.write_rollups(self.metrics.take_closed(now_ms() + 60_000));
+        self.store.write_budgets(self.gateway.budgets().rows(jiff::Timestamp::now()));
         if let Err(error) = self.store.flush().await {
             tracing::warn!(%error, "couldn't write the last records");
         }

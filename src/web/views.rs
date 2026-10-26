@@ -75,6 +75,12 @@ pub fn local_datetime(ms: i64) -> String {
         .unwrap_or_default()
 }
 
+pub fn local_date_time_short(ms: i64) -> String {
+    jiff::Timestamp::from_millisecond(ms)
+        .map(|t| t.to_zoned(jiff::tz::TimeZone::system()).strftime("%Y-%m-%d %H:%M").to_string())
+        .unwrap_or_default()
+}
+
 /// Buckets ending with the current one.
 pub fn buckets(metrics: &Metrics, window: Window, app: Option<&str>, now_ms: i64) -> Vec<Bucket> {
     let size = window.bucket_minutes() * MINUTE_MS;

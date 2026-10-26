@@ -19,6 +19,10 @@ pub struct Config {
     pub upstream: UpstreamConfig,
     pub store: StoreConfig,
     pub cache: CacheConfig,
+    pub queue: QueueConfig,
+    pub budgets: BudgetsConfig,
+    pub health: HealthConfig,
+    pub alerts: AlertsConfig,
     pub otel: OtelConfig,
     /// Per-app settings by app name. Apps that aren't listed use `default`'s settings, or built-in defaults.
     pub apps: BTreeMap<String, AppConfig>,
@@ -169,6 +173,139 @@ pub struct AppCacheConfig {
     pub join: Option<bool>,
 }
 
+/// The priority classes of the upstream queue (plan D14, phase 9.3).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Priority {
+    Interactive,
+    #[default]
+    Normal,
+    Batch,
+}
+
+impl Priority {
+    pub const ALL: [Priority; 3] = [Self::Interactive, Self::Normal, Self::Batch];
+
+    /// Lower goes first.
+    pub fn rank(self) -> u64 {
+        match self {
+            Self::Interactive => 0,
+            Self::Normal => 1,
+            Self::Batch => 2,
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Interactive => "interactive",
+            Self::Normal => "normal",
+            Self::Batch => "batch",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct ClassWaits {
+    pub interactive: u64,
+    pub normal: u64,
+    pub batch: u64,
+}
+
+impl ClassWaits {
+    pub fn get(&self, priority: Priority) -> u64 {
+        match priority {
+            Priority::Interactive => self.interactive,
+            Priority::Normal => self.normal,
+            Priority::Batch => self.batch,
+        }
+    }
+}
+
+impl Default for ClassWaits {
+    fn default() -> Self {
+        Self { interactive: 30, normal: 120, batch: 900 }
+    }
+}
+
+/// The upstream queue (phase 9.3).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct QueueConfig {
+    /// The longest a request of each class may wait for an upstream slot before it is refused with 503.
+    pub max_wait_seconds: ClassWaits,
+    /// A waiting request moves up one class for every this many seconds it has waited, so batch work isn't starved.
+    pub aging_seconds: u64,
+}
+
+impl Default for QueueConfig {
+    fn default() -> Self {
+        Self { max_wait_seconds: ClassWaits::default(), aging_seconds: 30 }
+    }
+}
+
+/// Budgets (phase 9.2); the limits themselves are per app.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct BudgetsConfig {
+    /// When days and months start: `system` or an IANA name such as `Asia/Kolkata`.
+    pub time_zone: String,
+}
+
+impl Default for BudgetsConfig {
+    fn default() -> Self {
+        Self { time_zone: "system".into() }
+    }
+}
+
+/// Upstream health and the circuit breaker (phase 9.4).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct HealthConfig {
+    pub probe_seconds: u64,
+    /// Failed connects in a row (probes or requests) that open the circuit.
+    pub failures_to_open: u32,
+}
+
+impl Default for HealthConfig {
+    fn default() -> Self {
+        Self { probe_seconds: 5, failures_to_open: 3 }
+    }
+}
+
+/// Alerts (phase 9.5).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct AlertsConfig {
+    pub enabled: bool,
+    /// Upstream errors and timeouts as a share of an app's requests over five minutes.
+    pub error_rate: f64,
+    /// The fewest requests in five minutes for the error rate to count.
+    pub min_requests: u64,
+    /// An app's p95 time to first token over five minutes.
+    pub ttft_p95_ms: u64,
+    /// An alert that has fired stays quiet this long before it can fire again.
+    pub cooldown_minutes: u64,
+    /// Also send alerts to Telegram (`JETWAY_TELEGRAM_TOKEN` and `JETWAY_TELEGRAM_CHAT_ID` in the environment or `.env`).
+    pub telegram: bool,
+    /// The Bot API's base URL (tests point it at a fake server).
+    pub telegram_api: String,
+}
+
+impl Default for AlertsConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            error_rate: 0.05,
+            min_requests: 20,
+            ttft_p95_ms: 15_000,
+            cooldown_minutes: 15,
+            telegram: false,
+            telegram_api: "https://api.telegram.org".into(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct OtelConfig {
@@ -192,6 +329,26 @@ pub struct AppConfig {
     /// May use Ollama's model-management endpoints (`pull`, `delete`, `create`, ...).
     pub admin: bool,
     pub cache: AppCacheConfig,
+    // Phase 9. Unset values fall back to `[apps.default]`, then to no limit (and `normal` priority).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub priority: Option<Priority>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub requests_per_minute: Option<u32>,
+    /// Requests allowed at once above the per-minute pace; defaults to a tenth of `requests_per_minute`, at least 1.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub burst: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub requests_per_day: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tokens_per_day: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tokens_per_month: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub gpu_seconds_per_day: Option<u64>,
+    /// An output cap Jetway adds to requests that set none (`num_predict` or `max_tokens`), so a runaway generation
+    /// can't hold the GPU for minutes (seen in phase 5).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_output_tokens: Option<u32>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -268,6 +425,25 @@ impl Config {
         if self.cache.ttl_hours == 0 {
             problems.push("cache.ttl_hours must be at least 1".into());
         }
+        let waits = &self.queue.max_wait_seconds;
+        if waits.interactive == 0 || waits.normal == 0 || waits.batch == 0 || self.queue.aging_seconds == 0 {
+            problems.push("queue waits and aging_seconds must be greater than 0".into());
+        }
+        if self.budgets.time_zone != "system" && jiff::tz::TimeZone::get(&self.budgets.time_zone).is_err() {
+            problems.push(format!(
+                "budgets.time_zone {:?} isn't \"system\" or a known IANA time zone",
+                self.budgets.time_zone
+            ));
+        }
+        if self.health.probe_seconds == 0 || self.health.failures_to_open == 0 {
+            problems.push("health.probe_seconds and health.failures_to_open must be at least 1".into());
+        }
+        if !(self.alerts.error_rate > 0.0 && self.alerts.error_rate <= 1.0) {
+            problems.push("alerts.error_rate must be above 0 and at most 1".into());
+        }
+        if !(self.alerts.telegram_api.starts_with("https://") || self.alerts.telegram_api.starts_with("http://")) {
+            problems.push("alerts.telegram_api must be an http:// or https:// URL".into());
+        }
 
         if !self.otel.endpoint.is_empty()
             && let Err(problem) = check_upstream_url(&self.otel.endpoint)
@@ -279,6 +455,10 @@ impl Config {
         for (name, app) in &self.apps {
             if !is_valid_name(name) {
                 problems.push(format!("app name {name:?} must match [a-z0-9-]{{1,32}}"));
+            }
+            if app.requests_per_minute == Some(0) || app.burst == Some(0) || app.max_output_tokens == Some(0) {
+                problems
+                    .push(format!("apps.{name}: requests_per_minute, burst and max_output_tokens must be at least 1"));
             }
             for key in &app.keys {
                 if key.trim().is_empty() {

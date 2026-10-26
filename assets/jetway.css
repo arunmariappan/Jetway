@@ -150,6 +150,7 @@ svg .hit:focus { outline: none; }
 .bar.s2, .key.s2 { fill: var(--series-2); background: var(--series-2); }
 .bar.s3, .key.s3 { fill: var(--series-3); background: var(--series-3); }
 .bar.critical, .key.critical { fill: var(--critical); background: var(--critical); }
+.bar.o1 { fill: var(--ord-1); } .bar.o2 { fill: var(--ord-2); } .bar.o3 { fill: var(--ord-3); }
 .bar.muted, .key.muted { fill: var(--muted); background: var(--muted); }
 
 details.table-view { margin-top: 8px; font-size: 12px; }
@@ -179,3 +180,21 @@ pre.body { background: var(--page); border: 1px solid var(--border); border-radi
 .stack > * + * { margin-top: 16px; }
 .empty { color: var(--muted); padding: 16px 0; }
 .htmx-request .refreshing { opacity: 0.6; }
+
+/* Budget meters: the fill carries the state (accent, warning, critical) over a lighter step of the same hue; the
+   percentage and a labelled badge say it in words too. */
+.meter-row { display: inline-flex; align-items: center; gap: 10px; }
+.meter { display: inline-block; width: 160px; height: 8px; border-radius: 4px; overflow: hidden; background: color-mix(in srgb, var(--series-1) 22%, var(--surface)); }
+.meter > span { display: block; height: 100%; border-radius: 4px; background: var(--series-1); }
+.meter.warn { background: color-mix(in srgb, var(--warning) 25%, var(--surface)); }
+.meter.warn > span { background: var(--warning); }
+.meter.critical { background: color-mix(in srgb, var(--critical) 22%, var(--surface)); }
+.meter.critical > span { background: var(--critical); }
+.meter-label { color: var(--text-secondary); font-size: 12px; font-variant-numeric: tabular-nums; }
+
+.banner-slot:empty { display: none; }
+.banner { display: block; padding: 8px 24px; border-bottom: 1px solid var(--border); color: var(--text-primary); background: color-mix(in srgb, var(--warning) 14%, var(--surface)); }
+.banner.error { background: color-mix(in srgb, var(--critical) 12%, var(--surface)); }
+.banner:hover { text-decoration: none; background: var(--wash); }
+.banner .badge { font-weight: 600; margin-right: 6px; }
+.banner .more { color: var(--text-secondary); }

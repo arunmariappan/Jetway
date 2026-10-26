@@ -1,1 +1,1 @@
-{% if up %}<span class="badge ok">{{ upstream }}{% if !version.is_empty() %} {{ version }}{% endif %}</span>{% else %}<span class="badge error">{{ upstream }} isn't answering</span>{% endif %} · {{ in_flight }} in progress
+{% if circuit_open %}<span class="badge error">{{ upstream }} is down · failing fast</span>{% else if up %}<span class="badge ok">{{ upstream }}{% if !version.is_empty() %} {{ version }}{% endif %}</span>{% else %}<span class="badge error">{{ upstream }} isn't answering</span>{% endif %} · {{ in_flight }} in progress

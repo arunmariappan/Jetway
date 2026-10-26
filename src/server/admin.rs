@@ -1,39 +1,36 @@
 //! The admin listener's shared state (plan D3): the dashboard, admin API and `/metrics` read from it. The routes
 //! are in [`crate::web`].
 
+use std::sync::Arc;
 use std::sync::atomic::Ordering;
-use std::sync::{Arc, Mutex, PoisonError};
-use std::time::Duration;
 
 use tokio::time::Instant;
 
 use super::Gateway;
+use crate::alerts::Alerts;
+use crate::limits::health::UpstreamStatus;
 use crate::metrics::{self, Gauges, Metrics};
 use crate::store::Store;
 use crate::web::feed::Feed;
-
-const STATUS_FOR: Duration = Duration::from_secs(5);
-
-/// Whether the upstream answered its last probe.
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
-pub struct UpstreamStatus {
-    pub up: bool,
-    pub version: Option<String>,
-    pub error: Option<String>,
-}
 
 pub struct Admin {
     pub gateway: Arc<Gateway>,
     pub metrics: Arc<Metrics>,
     pub store: Option<Arc<Store>>,
     pub feed: Feed,
+    pub alerts: Arc<Alerts>,
     pub started: Instant,
-    status: Mutex<Option<(Instant, UpstreamStatus)>>,
 }
 
 impl Admin {
-    pub fn new(gateway: Arc<Gateway>, metrics: Arc<Metrics>, store: Option<Arc<Store>>, feed: Feed) -> Self {
-        Self { gateway, metrics, store, feed, started: Instant::now(), status: Mutex::new(None) }
+    pub fn new(
+        gateway: Arc<Gateway>,
+        metrics: Arc<Metrics>,
+        store: Option<Arc<Store>>,
+        feed: Feed,
+        alerts: Arc<Alerts>,
+    ) -> Self {
+        Self { gateway, metrics, store, feed, alerts, started: Instant::now() }
     }
 
     pub fn gauges(&self) -> Gauges {
@@ -48,21 +45,13 @@ impl Admin {
             cache_entries,
             cache_bytes,
             flights: self.gateway.cache().flights.len(),
+            queue: self.gateway.scheduler().depth(),
+            circuit_open: self.gateway.health().is_open(),
         }
     }
 
-    /// The upstream's status, probed at most every five seconds.
-    pub async fn upstream_status(&self) -> UpstreamStatus {
-        if let Some((at, status)) = self.status.lock().unwrap_or_else(PoisonError::into_inner).clone()
-            && at.elapsed() < STATUS_FOR
-        {
-            return status;
-        }
-        let status = match self.gateway.probe_upstream().await {
-            Ok(version) => UpstreamStatus { up: true, version, error: None },
-            Err(error) => UpstreamStatus { up: false, version: None, error: Some(error) },
-        };
-        *self.status.lock().unwrap_or_else(PoisonError::into_inner) = Some((Instant::now(), status.clone()));
-        status
+    /// The upstream's status from the last probe or request (the probe task runs every `health.probe_seconds`).
+    pub fn upstream_status(&self) -> UpstreamStatus {
+        self.gateway.health().status()
     }
 }

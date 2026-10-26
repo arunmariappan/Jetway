@@ -2,7 +2,7 @@
 
 use rusqlite::Connection;
 
-const MIGRATIONS: &[&str] = &[V1, V2, V3];
+const MIGRATIONS: &[&str] = &[V1, V2, V3, V4];
 
 /// The schema version a fully migrated database has.
 pub const LATEST: usize = MIGRATIONS.len();
@@ -121,6 +121,27 @@ ALTER TABLE rollups_minute ADD COLUMN saved_gpu_ms INTEGER NOT NULL DEFAULT 0;
 /// Phase 4: the cacheable count, so restored rollups give the dashboard its cache hit rate.
 const V3: &str = r"
 ALTER TABLE rollups_minute ADD COLUMN cacheable INTEGER NOT NULL DEFAULT 0;
+";
+
+/// Phase 9: budget usage, what the limits did to each exchange, and queue waits and model loads in the rollups.
+const V4: &str = r"
+CREATE TABLE budget_usage (
+    app         TEXT NOT NULL,
+    period      TEXT NOT NULL,                 -- day | month
+    key         TEXT NOT NULL,                 -- 2026-10-26 or 2026-10, in budgets.time_zone
+    requests    INTEGER NOT NULL,
+    tokens      INTEGER NOT NULL,
+    gpu_ms      INTEGER NOT NULL,
+    updated_at  INTEGER NOT NULL,              -- epoch milliseconds
+    PRIMARY KEY (app, period, key)
+);
+
+ALTER TABLE exchanges ADD COLUMN priority TEXT;      -- interactive | normal | batch
+ALTER TABLE exchanges ADD COLUMN refusal TEXT;       -- rate_limit | budget | queue | circuit_open
+ALTER TABLE exchanges ADD COLUMN output_cap INTEGER; -- the output cap Jetway added
+
+ALTER TABLE rollups_minute ADD COLUMN queue_wait BLOB;  -- hdrhistogram V2, microseconds, upstream calls only
+ALTER TABLE rollups_minute ADD COLUMN model_loads INTEGER NOT NULL DEFAULT 0;
 ";
 
 pub fn version(connection: &Connection) -> rusqlite::Result<usize> {

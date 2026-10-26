@@ -16,9 +16,12 @@
     <a href="/live" {% if nav == "live" %}class="current"{% endif %}>Live</a>
     <a href="/apps" {% if nav == "apps" %}class="current"{% endif %}>Apps</a>
     <a href="/cache" {% if nav == "cache" %}class="current"{% endif %}>Cache</a>
+    <a href="/limits" {% if nav == "limits" %}class="current"{% endif %}>Limits</a>
+    <a href="/alerts" {% if nav == "alerts" %}class="current"{% endif %}>Alerts</a>
   </nav>
   <div class="status" hx-get="/fragments/status" hx-trigger="load, every 10s"></div>
 </header>
+<div class="banner-slot" hx-get="/fragments/alerts" hx-trigger="load, every 15s"></div>
 <main>
 {% block content %}{% endblock %}
 </main>

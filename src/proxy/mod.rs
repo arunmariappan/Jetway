@@ -50,6 +50,20 @@ impl Upstream {
     }
 }
 
+/// What went wrong in a failed upstream call, such as a refused connection: reqwest's own message only says that
+/// it couldn't send the request, so this is the innermost cause.
+pub fn cause(error: &reqwest::Error) -> String {
+    if error.is_timeout() {
+        // A refused loopback connect on Windows retries for about 2 s, so it usually ends as a connect timeout.
+        return if error.is_connect() { "couldn't connect (timed out)" } else { "timed out" }.into();
+    }
+    let mut source: &dyn std::error::Error = error;
+    while let Some(next) = source.source() {
+        source = next;
+    }
+    source.to_string()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

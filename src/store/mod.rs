@@ -22,6 +22,7 @@ pub use row::{ExchangeRow, RollupRow};
 pub use schema::LATEST as SCHEMA_VERSION;
 
 use crate::cache::Entry;
+use crate::limits::budget::UsageRow;
 
 const CHANNEL_OPS: usize = 4096;
 const BATCH: usize = 200;
@@ -56,6 +57,7 @@ enum WriteOp {
     CachePut(Box<([u8; 32], Entry)>),
     CacheHit([u8; 32], i64),
     CacheClear { app: Option<String>, done: oneshot::Sender<usize> },
+    Budgets(Vec<UsageRow>, i64),
 }
 
 /// Filters for listing exchanges.
@@ -172,6 +174,19 @@ impl Store {
         if !rows.is_empty() && self.tx.try_send(WriteOp::Rollups(rows)).is_err() {
             self.counters.dropped.fetch_add(1, Ordering::Relaxed);
         }
+    }
+
+    /// Queues current budget usage for writing (phase 9).
+    pub fn write_budgets(&self, rows: Vec<UsageRow>) {
+        let now = jiff::Timestamp::now().as_millisecond();
+        if !rows.is_empty() && self.tx.try_send(WriteOp::Budgets(rows, now)).is_err() {
+            self.counters.dropped.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    /// Stored budget usage for the given day and month keys.
+    pub async fn budgets_for(&self, day: String, month: String) -> Result<Vec<UsageRow>, StoreError> {
+        self.read(move |c| row::budgets_for(c, &day, &month)).await
     }
 
     /// Waits until everything queued so far is written.
@@ -331,6 +346,7 @@ fn apply(connection: &mut Connection, batch: Vec<WriteOp>) -> rusqlite::Result<(
             WriteOp::Prune { exchanges_before_ms, rollups_before_ms, done } => {
                 let exchanges = tx.execute("DELETE FROM exchanges WHERE started_at < ?1", [exchanges_before_ms])?;
                 let rollups = tx.execute("DELETE FROM rollups_minute WHERE minute < ?1", [rollups_before_ms])?;
+                tx.execute("DELETE FROM budget_usage WHERE updated_at < ?1", [rollups_before_ms])?;
                 let now = jiff::Timestamp::now().as_millisecond();
                 tx.execute("DELETE FROM cache_entries WHERE expires_at <= ?1", [now])?;
                 replies.push(Reply::Prune(done, (exchanges, rollups)));
@@ -345,6 +361,11 @@ fn apply(connection: &mut Connection, batch: Vec<WriteOp>) -> rusqlite::Result<(
                     "UPDATE cache_entries SET hits = hits + 1, last_hit_at = ?2 WHERE key = ?1",
                     params![&key[..], at],
                 )?;
+            }
+            WriteOp::Budgets(rows, at) => {
+                for usage in rows {
+                    row::upsert_budget(&tx, &usage, at)?;
+                }
             }
             WriteOp::CacheClear { app, done } => {
                 let deleted = tx.execute("DELETE FROM cache_entries WHERE ?1 IS NULL OR app = ?1", params![app])?;

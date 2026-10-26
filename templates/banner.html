@@ -1,0 +1,1 @@
+{% if let Some(a) = first %}<a class="banner {{ a.badge }}" href="/alerts"><span class="badge {{ a.badge }}">{{ a.severity }}</span> {{ a.message }}{% if more > 0 %} <span class="more">and {{ more }} more</span>{% endif %}</a>{% endif %}

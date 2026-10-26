@@ -32,6 +32,26 @@ sampled = "allow"                  # allow | skip: requests with temperature > 0
 replay = "instant"                 # instant | paced (cached streams at the original token rate)
 join = true                        # identical requests in flight share one upstream call
 
+[queue]                            # phase 9; per app: priority = "interactive" | "normal" | "batch"
+max_wait_seconds = { interactive = 30, normal = 120, batch = 900 }
+aging_seconds = 30                 # a waiting request moves up one class per 30 s waited
+
+[budgets]                          # per app: requests_per_minute, burst, requests_per_day, tokens_per_day,
+time_zone = "system"               # tokens_per_month, gpu_seconds_per_day, max_output_tokens; days start here
+
+[health]
+probe_seconds = 5                  # GET /api/version on the upstream
+failures_to_open = 3               # failed connects in a row that open the circuit (fail fast with 503)
+
+[alerts]
+enabled = true
+error_rate = 0.05                  # upstream errors and timeouts over 5 minutes, per app
+min_requests = 20
+ttft_p95_ms = 15_000
+cooldown_minutes = 15
+telegram = false                   # needs JETWAY_TELEGRAM_TOKEN and JETWAY_TELEGRAM_CHAT_ID (environment or .env)
+telegram_api = "https://api.telegram.org"
+
 [otel]
 endpoint = ""                      # e.g. "http://127.0.0.1:8200" (BlackBox) or the Aspire dashboard's OTLP/HTTP port
 service_name = "jetway"

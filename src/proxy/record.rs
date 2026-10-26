@@ -13,6 +13,7 @@ use tokio::time::Instant;
 use ulid::Ulid;
 
 use crate::cache::CacheNote;
+use crate::limits::LimitNote;
 use crate::protocol::decode::{NdjsonDecoder, SseDecoder};
 use crate::protocol::summary::{RequestSummary, ResponseSummary};
 use crate::protocol::{Framing, Protocol};
@@ -44,6 +45,8 @@ pub struct Exchange {
     pub spans: Option<SpanIds>,
     /// What the cache did, for generation and embedding requests.
     pub cache: Option<CacheNote>,
+    /// The app's priority, and what the limits did (phase 9).
+    pub limits: LimitNote,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -56,7 +59,7 @@ pub enum Outcome {
     ClientCancelled,
     /// No first byte, or a silence between chunks longer than the idle timeout.
     Timeout,
-    /// Refused by Jetway before reaching the upstream (unknown path, not allowed, too large).
+    /// Refused by Jetway before reaching the upstream (unknown path, not allowed, too large, or a limit in phase 9).
     Rejected,
 }
 
@@ -81,6 +84,8 @@ impl Outcome {
 /// Offsets from [`Exchange::started`].
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct Timings {
+    /// Time spent waiting for an upstream slot (phase 9), included in `upstream_sent`.
+    pub queue_wait: Option<Duration>,
     pub upstream_sent: Option<Duration>,
     pub headers: Option<Duration>,
     /// The first response byte forwarded to the client.

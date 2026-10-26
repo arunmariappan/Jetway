@@ -1,0 +1,56 @@
+{% extends "base.html" %}
+{% block content %}
+<h1>Limits</h1>
+<p class="sub">Fair use of one GPU: the upstream's health, the queue for upstream slots, each app's budgets and the requests the limits refused.</p>
+<div class="filters">
+  <div class="segmented" role="group" aria-label="Time window">
+    {% for w in windows %}<a href="{{ w.href }}" {% if w.current %}class="current" aria-current="true"{% endif %}>{{ w.label }}</a>{% endfor %}
+  </div>
+</div>
+<div class="tiles">
+{% for t in tiles %}<div class="card tile"><div class="label">{{ t.label }}</div><div class="value">{{ t.value }}</div>{% if !t.note.is_empty() %}<div class="note">{{ t.note }}</div>{% endif %}</div>
+{% endfor %}</div>
+<div class="charts" style="margin-bottom:16px">
+{% for c in charts %}<figure class="card" style="margin:0">
+  <h2>{{ c.title }}</h2>
+  <p class="sub">{{ c.subtitle }}</p>
+  <div class="legend">{% for l in c.legend %}<span><i class="key {{ l.kind }} {{ l.class }}"></i>{{ l.name }}</span>{% endfor %}</div>
+  {{ c.svg|safe }}
+  <details class="table-view"><summary>Table</summary><div class="scroll"><table class="data">
+    <thead><tr>{% for h in c.head %}<th>{{ h }}</th>{% endfor %}</tr></thead>
+    <tbody>{% for r in c.rows %}<tr>{% for v in r %}<td>{{ v }}</td>{% endfor %}</tr>{% endfor %}</tbody>
+  </table></div></details>
+</figure>
+{% endfor %}</div>
+<div class="stack">
+<section class="card">
+  <h2>Budgets</h2>
+  <p class="sub">Upstream calls only: cache hits and joined requests use none. A request that starts with budget left may overshoot it.</p>
+  {% if budgets.is_empty() %}<p class="empty">No app has a budget. Set requests_per_day, tokens_per_day, tokens_per_month or gpu_seconds_per_day under [apps.&lt;name&gt;] or [apps.default].</p>{% else %}
+  <div class="scroll" style="max-height:none"><table class="data">
+    <thead><tr><th>App</th><th>Budget</th><th class="num">Used</th><th class="num">Limit</th><th>Usage</th><th>Resets</th></tr></thead>
+    <tbody>{% for b in budgets %}<tr><td>{{ b.app }}</td><td>{{ b.budget }}</td><td class="num">{{ b.used_text }}</td><td class="num">{{ b.limit_text }}</td>
+    <td><span class="meter-row"><span class="meter {{ b.level }}" role="meter" aria-valuemin="0" aria-valuemax="{{ b.limit }}" aria-valuenow="{{ b.used }}" aria-label="{{ b.app }} {{ b.budget }}"><span style="width:{{ b.fill }}%"></span></span>
+    <span class="meter-label">{{ b.fill }}%{% if b.level == "critical" %} · <span class="badge error">used up</span>{% else if b.level == "warn" %} · <span class="badge warn">near the limit</span>{% endif %}</span></span></td>
+    <td>{{ b.resets }}</td></tr>{% endfor %}</tbody>
+  </table></div>
+  {% endif %}
+</section>
+<section class="card">
+  <h2>Apps</h2>
+  <p class="sub">Priority decides the order of the queue; a waiting request moves up a class for every aging period it has waited.</p>
+  <div class="scroll" style="max-height:none"><table class="data">
+    <thead><tr><th>App</th><th>Priority</th><th>Rate limit</th><th>Output cap</th><th class="num">Longest wait</th></tr></thead>
+    <tbody>{% for a in apps %}<tr><td>{{ a.app }}</td><td>{{ a.priority }}</td><td>{{ a.rate }}</td><td>{{ a.output_cap }}</td><td class="num">{{ a.max_wait }}</td></tr>{% endfor %}</tbody>
+  </table></div>
+</section>
+<section class="card">
+  <h2>Refused</h2>
+  <p class="sub">Since Jetway started. Rate limits and budgets answer 429; a full queue and an open circuit answer 503. Each carries Retry-After.</p>
+  {% if refusals.is_empty() %}<p class="empty">Nothing refused.</p>{% else %}
+  <table class="data"><thead><tr><th>App</th><th class="num">Rate limit</th><th class="num">Budget</th><th class="num">Queue full</th><th class="num">Upstream down</th></tr></thead>
+  <tbody>{% for r in refusals %}<tr><td>{{ r.app }}</td><td class="num">{{ r.rate_limit }}</td><td class="num">{{ r.budget }}</td><td class="num">{{ r.queue }}</td><td class="num">{{ r.circuit_open }}</td></tr>{% endfor %}</tbody></table>
+  {% endif %}
+</section>
+</div>
+{% endblock %}

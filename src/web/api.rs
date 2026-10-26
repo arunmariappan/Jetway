@@ -9,7 +9,7 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use serde_json::json;
 
-use super::{ClearForm, Params, clear, now_ms, views};
+use super::{ClearForm, Params, clear, limits as limit_views, now_ms, views};
 use crate::server::admin::Admin;
 use crate::store::ListFilter;
 
@@ -21,6 +21,8 @@ pub fn router() -> Router<Arc<Admin>> {
         .route("/apps", get(apps))
         .route("/cache", get(cache))
         .route("/cache/clear", post(cache_clear))
+        .route("/limits", get(limits))
+        .route("/alerts", get(alerts))
 }
 
 fn error(status: StatusCode, message: impl ToString) -> Response {
@@ -39,7 +41,7 @@ async fn overview(State(admin): State<Arc<Admin>>, Query(params): Query<Params>)
         "memory_bytes": gauges.memory_bytes,
         "log_dropped": gauges.log_dropped,
         "cache_entries": gauges.cache_entries,
-        "upstream": admin.upstream_status().await,
+        "upstream": admin.upstream_status(),
     }))
     .into_response()
 }
@@ -106,4 +108,12 @@ async fn cache_clear(State(admin): State<Arc<Admin>>, body: Option<Json<ClearFor
         Ok(deleted) => Json(json!({"deleted": deleted, "memory_cleared": true})).into_response(),
         Err(e) => error(StatusCode::INTERNAL_SERVER_ERROR, e),
     }
+}
+
+async fn limits(State(admin): State<Arc<Admin>>) -> Response {
+    Json(limit_views::data(&admin)).into_response()
+}
+
+async fn alerts(State(admin): State<Arc<Admin>>) -> Response {
+    Json(json!({"active": admin.alerts.active(), "resolved": admin.alerts.resolved()})).into_response()
 }

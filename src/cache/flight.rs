@@ -166,6 +166,11 @@ impl Flights {
         self.map.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
+    /// Joins the flight for `key`, if there is one still running.
+    pub fn join(&self, key: &CacheKey) -> Option<Reader> {
+        self.lock().get(key).and_then(Flight::reader)
+    }
+
     /// Joins the flight for `key`, or starts one led by `leader`.
     pub fn join_or_lead(&self, key: CacheKey, leader: ulid::Ulid) -> Joined {
         let mut map = self.lock();

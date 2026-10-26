@@ -1,5 +1,6 @@
 //! The gateway listener: app identity, the path allow-list (phase 1), the exact cache and joined requests
-//! (phase 3), forwarding with the stream tee, and graceful shutdown.
+//! (phase 3), rate limits, budgets, the upstream queue and the circuit breaker (phase 9), forwarding with the stream
+//! tee, and graceful shutdown.
 
 pub mod admin;
 pub mod identity;
@@ -25,9 +26,15 @@ use tokio::time::Instant;
 use ulid::Ulid;
 
 use crate::cache::answer::{self, Entry};
-use crate::cache::flight::{Joined, Reader, Start, fly};
+use crate::cache::flight::{Flight, Joined, Reader, Start, fly};
 use crate::cache::{CACHE_HEADER, Cache, CacheKey, hit_note, joined_note};
 use crate::config::{Config, Replay};
+use crate::limits::budget::Budgets;
+use crate::limits::cap::cap_output;
+use crate::limits::health::Health;
+use crate::limits::rate::RateLimits;
+use crate::limits::scheduler::Scheduler;
+use crate::limits::{AppLimits, LimitNote, Refusal, thousands};
 use crate::protocol::summary::RequestSummary;
 use crate::protocol::{Framing, Protocol};
 use crate::proxy::inflight::{Inflight, InflightGuard};
@@ -42,6 +49,10 @@ use identity::{DEFAULT_APP, KeyMap, identify};
 use routes::{PathClass, classify};
 
 pub const ID_HEADER: &str = "x-jetway-id";
+/// The `User-Agent` of Jetway's health probes, so they are easy to tell apart in Ollama's log.
+pub const PROBE_AGENT: &str = "jetway-probe";
+/// Milliseconds the request waited for an upstream slot (phase 9.3).
+pub const QUEUE_WAIT_HEADER: &str = "x-jetway-queue-wait";
 
 /// Exchange ids increase strictly, even within one millisecond, so ordering by id is ordering by arrival (the
 /// request log pages by id).
@@ -62,6 +73,11 @@ pub struct Gateway {
     inflight: Arc<Inflight>,
     /// Span ids are chosen per request only when spans are exported.
     spans: bool,
+    // Phase 9.
+    rates: RateLimits,
+    budgets: Arc<Budgets>,
+    scheduler: Arc<Scheduler>,
+    health: Arc<Health>,
 }
 
 impl Gateway {
@@ -71,13 +87,41 @@ impl Gateway {
         let keys = KeyMap::from_config(&config);
         let spans = !config.otel.endpoint.is_empty();
         let cache = Arc::new(Cache::new(&config, store));
-        // The cache stores answers before anything else sees the exchange.
-        let sink: Arc<dyn Sink> = Arc::new(Sinks(vec![Arc::clone(&cache) as Arc<dyn Sink>, sink]));
-        Ok(Arc::new(Self { config, upstream, keys, sink, cache, inflight: Arc::default(), spans }))
+        let budgets = Arc::new(Budgets::new(&config.budgets.time_zone));
+        let scheduler = Scheduler::new(config.upstream.slots as usize, Duration::from_secs(config.queue.aging_seconds));
+        let health = Arc::new(Health::new(config.health.failures_to_open));
+        // The cache stores answers and budgets count usage before anything else sees the exchange.
+        let sink: Arc<dyn Sink> =
+            Arc::new(Sinks(vec![Arc::clone(&cache) as Arc<dyn Sink>, Arc::clone(&budgets) as Arc<dyn Sink>, sink]));
+        Ok(Arc::new(Self {
+            config,
+            upstream,
+            keys,
+            sink,
+            cache,
+            inflight: Arc::default(),
+            spans,
+            rates: RateLimits::default(),
+            budgets,
+            scheduler,
+            health,
+        }))
     }
 
     pub fn cache(&self) -> &Arc<Cache> {
         &self.cache
+    }
+
+    pub fn budgets(&self) -> &Arc<Budgets> {
+        &self.budgets
+    }
+
+    pub fn scheduler(&self) -> &Arc<Scheduler> {
+        &self.scheduler
+    }
+
+    pub fn health(&self) -> &Arc<Health> {
+        &self.health
     }
 
     pub fn upstream_name(&self) -> &str {
@@ -86,12 +130,17 @@ impl Gateway {
 
     /// Asks the upstream for its version (the dashboard's status line). `Err` says why it didn't answer.
     pub async fn probe_upstream(&self) -> Result<Option<String>, String> {
-        let request = self.upstream.client.get(self.upstream.url_for("/api/version")).timeout(Duration::from_secs(2));
-        let response = request.send().await.map_err(|e| e.to_string())?;
+        let request = self
+            .upstream
+            .client
+            .get(self.upstream.url_for("/api/version"))
+            .header("user-agent", concat!("jetway-probe/", env!("CARGO_PKG_VERSION")))
+            .timeout(Duration::from_secs(2));
+        let response = request.send().await.map_err(|e| crate::proxy::cause(&e))?;
         if !response.status().is_success() {
             return Err(format!("status {}", response.status()));
         }
-        let body = response.bytes().await.map_err(|e| e.to_string())?;
+        let body = response.bytes().await.map_err(|e| crate::proxy::cause(&e))?;
         let value: serde_json::Value = serde_json::from_slice(&body).map_err(|e| e.to_string())?;
         Ok(value.get("version").and_then(|v| v.as_str()).map(str::to_string))
     }
@@ -192,6 +241,92 @@ fn reject(
     set_id(&mut response, exchange.id);
     finish_without_response(gateway.sink.as_ref(), exchange, status.as_u16(), outcome, message, timings, body);
     response
+}
+
+/// Refuses an exchange for fair use (phase 9): the client's error format, `Retry-After` in whole seconds, and the
+/// reason on the record.
+fn refuse(
+    gateway: &Gateway,
+    mut exchange: Exchange,
+    refusal: Refusal,
+    retry_after: Duration,
+    timings: Timings,
+    message: String,
+) -> Response {
+    exchange.limits.refusal = Some(refusal);
+    let mut response = reject(gateway, exchange, refusal.status(), Outcome::Rejected, timings, message);
+    let seconds = retry_after.as_secs() + u64::from(retry_after.subsec_nanos() > 0);
+    set_header(&mut response, "retry-after", &seconds.max(1).to_string());
+    response
+}
+
+/// Records an exchange as cancelled if its handler is dropped while it waits for an upstream slot or the upstream's
+/// response: the server drops a handler whose client has left, which would otherwise leave no record at all.
+struct CancelGuard<'a> {
+    sink: &'a Arc<dyn Sink>,
+    /// A copy taken when armed; the handler keeps the original.
+    exchange: Option<Exchange>,
+    timings: Timings,
+}
+
+impl<'a> CancelGuard<'a> {
+    fn arm(sink: &'a Arc<dyn Sink>, exchange: &Exchange) -> Self {
+        Self { sink, exchange: Some(exchange.clone()), timings: Timings::default() }
+    }
+
+    fn disarm(&mut self) {
+        self.exchange = None;
+    }
+}
+
+impl Drop for CancelGuard<'_> {
+    fn drop(&mut self) {
+        if let Some(exchange) = self.exchange.take() {
+            let message = "the client left before the upstream answered".to_string();
+            // 499, as nginx records a request its client closed: nothing was sent.
+            finish_without_response(
+                self.sink.as_ref(),
+                exchange,
+                499,
+                Outcome::ClientCancelled,
+                message,
+                self.timings,
+                Bytes::new(),
+            );
+        }
+    }
+}
+
+/// The flight an exchange leads, until its upstream response starts. Dropped before then (its client left while it
+/// was queued, say), it fails the flight, so the requests that joined it don't wait forever.
+struct Lead {
+    cache: Arc<Cache>,
+    key: CacheKey,
+    flight: Option<Arc<Flight>>,
+    protocol: Protocol,
+}
+
+impl Lead {
+    /// Gives the requests that joined the same error this one gets.
+    fn fail(&mut self, status: StatusCode, message: &str) {
+        if let Some(flight) = self.flight.take() {
+            let mut headers = axum::http::HeaderMap::new();
+            headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json; charset=utf-8"));
+            let body = errors::error_body(self.protocol, status, message);
+            flight.started(Start::Failed { status, headers, body });
+            self.cache.flights.remove(&self.key, &flight);
+        }
+    }
+
+    fn into_parts(mut self) -> (CacheKey, Option<Arc<Flight>>) {
+        (self.key, self.flight.take())
+    }
+}
+
+impl Drop for Lead {
+    fn drop(&mut self) {
+        self.fail(StatusCode::SERVICE_UNAVAILABLE, "the request it joined was cancelled before reaching the upstream");
+    }
 }
 
 fn set_id(response: &mut Response, id: Ulid) {
@@ -354,6 +489,7 @@ async fn handle(State(gateway): State<Arc<Gateway>>, request: Request) -> Respon
         spans: gateway.spans.then(|| SpanIds::new(traceparent.as_deref())),
         traceparent,
         cache: None,
+        limits: LimitNote::default(),
     };
     let inflight = gateway.inflight.enter(&exchange);
     let mut timings = Timings::default();
@@ -375,6 +511,20 @@ async fn handle(State(gateway): State<Arc<Gateway>>, request: Request) -> Respon
             return reject(&gateway, exchange, StatusCode::FORBIDDEN, Outcome::Rejected, timings, message);
         }
         _ => {}
+    }
+
+    // Rate limits come first, before the body is read (phase 9.1).
+    let limits = AppLimits::for_app(&gateway.config, &exchange.app);
+    exchange.limits.priority = limits.priority;
+    let metered = matches!(class, PathClass::Generation | PathClass::Embedding);
+    if metered && let Err(wait) = gateway.rates.check(&exchange.app, &limits) {
+        let message = format!(
+            "rate limit: {} may send {} requests a minute; retry in {:.1} s",
+            exchange.app,
+            thousands(u64::from(limits.requests_per_minute.unwrap_or(0))),
+            wait.as_secs_f64()
+        );
+        return refuse(&gateway, exchange, Refusal::RateLimit, wait, timings, message);
     }
 
     let limit = gateway.config.server.max_request_bytes;
@@ -403,10 +553,11 @@ async fn handle(State(gateway): State<Arc<Gateway>>, request: Request) -> Respon
         }
     }
 
-    // The exact cache, then joining an identical request in flight (phase 3).
+    // The exact cache, then joining an identical request in flight (phase 3). Neither uses the GPU, so neither needs
+    // budget or a slot.
     let decision = gateway.cache.decide(&exchange, body_value.as_ref(), &parts.headers);
     exchange.cache = decision.as_ref().map(|d| d.note.clone());
-    let mut leader = None;
+    let join_key = decision.as_ref().filter(|d| d.lookup).and_then(|d| d.join);
     if let Some(decision) = &decision
         && decision.lookup
     {
@@ -415,26 +566,53 @@ async fn handle(State(gateway): State<Arc<Gateway>>, request: Request) -> Respon
         {
             return serve_hit(&gateway, exchange, key, &entry, timings, inflight);
         }
-        if let Some(join_key) = decision.join {
-            match gateway.cache.flights.join_or_lead(join_key, exchange.id) {
-                Joined::Follower(reader) => return serve_joined(&gateway, exchange, reader, timings, inflight).await,
-                Joined::Leader(flight) => leader = Some((join_key, flight)),
+        if let Some(key) = &join_key
+            && let Some(reader) = gateway.cache.flights.join(key)
+        {
+            return serve_joined(&gateway, exchange, reader, timings, inflight).await;
+        }
+    }
+
+    // Fair use (phase 9): a dead upstream fails fast, and an app with a used-up budget is refused.
+    let admit = |exchange: &Exchange| -> Result<(), (Refusal, Duration, String)> {
+        if gateway.health.is_open() {
+            let message = format!(
+                "{} is down (no answer at {}); Jetway fails requests at once until it answers again",
+                gateway.config.upstream.name,
+                gateway.upstream.base()
+            );
+            return Err((Refusal::CircuitOpen, Duration::from_secs(gateway.config.health.probe_seconds), message));
+        }
+        if metered && let Err(exceeded) = gateway.budgets.check(&exchange.app, &limits, jiff::Timestamp::now()) {
+            return Err((Refusal::Budget, exceeded.retry_after, exceeded.message));
+        }
+        Ok(())
+    };
+    if let Err((refusal, retry_after, message)) = admit(&exchange) {
+        return refuse(&gateway, exchange, refusal, retry_after, timings, message);
+    }
+
+    let mut lead = None;
+    if let Some(key) = join_key {
+        match gateway.cache.flights.join_or_lead(key, exchange.id) {
+            Joined::Follower(reader) => return serve_joined(&gateway, exchange, reader, timings, inflight).await,
+            Joined::Leader(flight) => {
+                lead = Some(Lead { cache: Arc::clone(&gateway.cache), key, flight: Some(flight), protocol });
             }
         }
     }
-    // Joined requests waiting on a flight whose upstream call failed get the same error.
-    let fail_flight = |status: StatusCode, message: &str| {
-        if let Some((key, flight)) = &leader {
-            let mut headers = axum::http::HeaderMap::new();
-            headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json; charset=utf-8"));
-            let body = errors::error_body(protocol, status, message);
-            flight.started(Start::Failed { status, headers, body });
-            gateway.cache.flights.remove(key, flight);
-        }
-    };
 
-    // Exact token counts for OpenAI streams: ask for usage the client didn't, and hide it again (plan D21).
     let mut upstream_body = request_body;
+    // The app's output cap, for a request that sets none (phase 9).
+    if class == PathClass::Generation
+        && let Some(cap) = limits.max_output_tokens
+        && exchange.summary.as_ref().is_some_and(|s| s.max_tokens.is_none_or(|n| n < 0))
+        && let Some(body) = cap_output(protocol, &upstream_body, cap)
+    {
+        upstream_body = body;
+        exchange.limits.output_cap = Some(cap);
+    }
+    // Exact token counts for OpenAI streams: ask for usage the client didn't, and hide it again (plan D21).
     let mut usage_filter = None;
     if protocol == Protocol::OpenAi
         && class == PathClass::Generation
@@ -444,6 +622,45 @@ async fn handle(State(gateway): State<Arc<Gateway>>, request: Request) -> Respon
         upstream_body = body;
         usage_filter = Some(UsageFilter::default());
     }
+
+    // From here the client may leave while this waits for a slot or for the upstream's response.
+    let mut cancelled = CancelGuard::arm(&gateway.sink, &exchange);
+
+    // One upstream slot per request at a time, by priority (phase 9.3). A flight's leader waits for the slot and
+    // the requests that join it share it.
+    let mut slot = None;
+    if metered {
+        let max_wait = Duration::from_secs(gateway.config.queue.max_wait_seconds.get(limits.priority));
+        match gateway.scheduler.acquire(limits.priority, max_wait).await {
+            Ok((permit, waited)) => {
+                timings.queue_wait = Some(waited);
+                cancelled.timings = timings;
+                slot = Some(permit);
+            }
+            Err(shed) => {
+                cancelled.disarm();
+                let message = format!(
+                    "the upstream is busy: no slot within {:.0} s, the longest a {} request waits",
+                    shed.waited.as_secs_f64(),
+                    limits.priority.as_str()
+                );
+                if let Some(lead) = &mut lead {
+                    lead.fail(StatusCode::SERVICE_UNAVAILABLE, &message);
+                }
+                let retry_after = Duration::from_secs(gateway.config.queue.aging_seconds);
+                return refuse(&gateway, exchange, Refusal::Queue, retry_after, timings, message);
+            }
+        }
+        // The budget or the upstream may have gone while it waited.
+        if let Err((refusal, retry_after, message)) = admit(&exchange) {
+            cancelled.disarm();
+            if let Some(lead) = &mut lead {
+                lead.fail(refusal.status(), &message);
+            }
+            return refuse(&gateway, exchange, refusal, retry_after, timings, message);
+        }
+    }
+    let queue_wait = timings.queue_wait;
 
     let mut upstream_headers = headers::to_upstream(&parts.headers);
     if let Some(ids) = &exchange.spans
@@ -460,20 +677,33 @@ async fn handle(State(gateway): State<Arc<Gateway>>, request: Request) -> Respon
         .body(upstream_body)
         .send();
     timings.upstream_sent = Some(started.elapsed());
-    let response = match tokio::time::timeout(upstream.first_byte_timeout, send).await {
-        Ok(Ok(response)) => response,
+    cancelled.timings = timings;
+    let result = tokio::time::timeout(upstream.first_byte_timeout, send).await;
+    cancelled.disarm();
+    let response = match result {
+        Ok(Ok(response)) => {
+            gateway.health.success(None);
+            response
+        }
         Ok(Err(error)) => {
+            if error.is_connect() {
+                gateway.health.failure(&crate::proxy::cause(&error));
+            }
             let message = if error.is_connect() || error.is_timeout() {
                 format!("Ollama isn't reachable at {}", upstream.base())
             } else {
                 format!("the upstream request failed: {error}")
             };
-            fail_flight(StatusCode::BAD_GATEWAY, &message);
+            if let Some(lead) = &mut lead {
+                lead.fail(StatusCode::BAD_GATEWAY, &message);
+            }
             return reject(&gateway, exchange, StatusCode::BAD_GATEWAY, Outcome::UpstreamError, timings, message);
         }
         Err(_) => {
             let message = format!("no response from the upstream within {} s", upstream.first_byte_timeout.as_secs());
-            fail_flight(StatusCode::GATEWAY_TIMEOUT, &message);
+            if let Some(lead) = &mut lead {
+                lead.fail(StatusCode::GATEWAY_TIMEOUT, &message);
+            }
             return reject(&gateway, exchange, StatusCode::GATEWAY_TIMEOUT, Outcome::Timeout, timings, message);
         }
     };
@@ -505,11 +735,12 @@ async fn handle(State(gateway): State<Arc<Gateway>>, request: Request) -> Respon
         // Only an event stream can carry the usage event.
         usage_filter: usage_filter.filter(|_| framing == Framing::Sse),
         recorder: Recorder::spawn(exchange, framing, Arc::clone(&gateway.sink)),
+        slot,
         inflight,
     });
 
-    let body = match leader {
-        Some((key, flight)) => {
+    let body = match lead.map(Lead::into_parts) {
+        Some((key, Some(flight))) => {
             flight.started(Start::Response { status, headers: client_headers.clone() });
             match flight.reader() {
                 Some(reader) => {
@@ -525,7 +756,7 @@ async fn handle(State(gateway): State<Arc<Gateway>>, request: Request) -> Respon
                 None => Body::from_stream(tee),
             }
         }
-        None => Body::from_stream(tee),
+        _ => Body::from_stream(tee),
     };
 
     let mut response = Response::new(body);
@@ -533,6 +764,9 @@ async fn handle(State(gateway): State<Arc<Gateway>>, request: Request) -> Respon
     *response.headers_mut() = client_headers;
     if let Some(result) = cache_result {
         set_header(&mut response, CACHE_HEADER, result);
+    }
+    if let Some(wait) = queue_wait {
+        set_header(&mut response, QUEUE_WAIT_HEADER, &wait.as_millis().to_string());
     }
     set_id(&mut response, id);
     response
