@@ -4,8 +4,8 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Jetway is an LLM gateway in Rust between apps and the host Ollama: streaming pass-through for Ollama's API and the
 OpenAI-compatible API, exact and semantic caches, joined in-flight requests, personal-data and prompt-injection
-guards, thinking on/off routing for `qwen3.5:4b`, budgets, a priority queue and a live dashboard. **Phases 0–3
-(bootstrap, pass-through, request log, exact cache) are done; phase 4 (dashboard, the MVP) is next.** Read [docs/plan/README.md](docs/plan/README.md) and the current phase file before working; each phase
+guards, thinking on/off routing for `qwen3.5:4b`, budgets, a priority queue and a live dashboard. **Phases 0–4
+(the MVP: pass-through, request log, exact cache, dashboard) are done; phase 5 (real clients) is next.** Read [docs/plan/README.md](docs/plan/README.md) and the current phase file before working; each phase
 file has tasks, tests and "done when" items to tick, and ends with a "What was built" section (with "Rust notes",
 plan D20) recording decisions and what is left. Keep the plan's status line and the README in step when a phase
 lands.
@@ -39,6 +39,7 @@ cargo run -- serve                            # gateway :8300 → upstream.url, 
 cargo run -- requests tail -f [--app A]       # the request log (data/jetway.db); `requests show <id> --bodies`
 cargo run -- db migrate | db prune --older-than 7d
 cargo run -- cache stats | cache list [--app A] | cache clear [--app A]
+cargo run -- load --rate 5 --duration 120 --fake   # demo traffic (with fake-ollama upstream) for dashboard work
 cargo run -- fake-ollama --port 8399          # fake upstream; JETWAY__UPSTREAM__URL=http://127.0.0.1:8399 to use it
 cargo bench --bench overhead                  # added latency per request and per chunk (release build)
 OLLAMA_HOST=127.0.0.1:8300 ollama run qwen3.5:4b "hi"   # the ollama CLI through Jetway (app "default")
@@ -62,6 +63,9 @@ cargo deny check                              # licences, advisories, duplicates
 - `src/cache/`: `mod.rs` (decision per request, lookup memory then SQLite, the cache sink that stores answers),
   `key.rs` (canonical blake3 key, join key), `answer.rs` (`Entry`, `Answer`, serving a hit in either stream mode),
   `flight.rs` (joined requests). `src/proxy/served.rs`: bodies for hits and flight readers.
+- `src/web/`: the admin listener's routes (`mod.rs`), page models and askama templates (`pages.rs`, `templates/`),
+  data from the rollups (`views.rs`), SVG charts (`charts.rs`), the SSE live feed (`feed.rs`), embedded assets
+  (`assets.rs`, `assets/`), the JSON API (`api.rs`). `src/server/admin.rs`: the admin state.
 - `src/app.rs`: starts and stops everything `serve` runs; tests use it through `tests/common::Stack`.
 - `tests/common/`: `Harness` (fake + gateway only) and `Stack` (the whole app with a temporary database).
   `tests/pass_through.rs`: phase 1; `tests/request_log.rs`: phase 2.
@@ -90,6 +94,11 @@ cargo deny check                              # licences, advisories, duplicates
 - A body that hyper reads with a `Content-Length` (or never reads: HEAD) is dropped without a final poll, so every
   body type ends its exchange as `ok` when its last byte is handed over (`TeeBody::expected_len`, `ServedBody`,
   `FlightBody`). Forget that and finished exchanges show as `client_cancelled`.
+- Dashboard colours come from the validated data-viz palette (CSS variables in `assets/jetway.css`, light and dark);
+  new chart colours must be checked with the dataviz skill's validator, not picked by eye. No hand-written
+  JavaScript: interactivity is htmx attributes, CSS hover and native SVG `<title>` tooltips.
+- The dashboard reads in-memory rollups; `app::start` restores the last day from SQLite. Assets are `no-cache` with
+  an ETag, so a rebuilt binary's CSS shows up at once. Playwright screenshots go to the scratchpad, never Downloads.
 - Test harnesses (`Harness`, `Stack`) start with `cache.exact = false`; tests that want the cache turn it on.
 - `serde_json` has `preserve_order`; the cache key must keep sorting keys itself (`cache::key`).
 - Streamed and unstreamed versions of the same request share a cache key (`stream` isn't part of it).

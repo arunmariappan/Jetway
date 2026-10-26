@@ -10,8 +10,8 @@ and shows all of it live on a dashboard.
 Jetway is one Rust binary. It speaks Ollama's own API and Ollama's OpenAI-compatible API, so it works with PaperPilot
 (.NET, OllamaSharp), BlackBox's OpsDesk agent (Python, `ollama`), the `ollama` CLI and any OpenAI client.
 
-> **Status (2026-10-25):** plan approved; phases 0–3 (bootstrap, pass-through, request log, exact cache) done; phase 4
-> (dashboard, the MVP) next.
+> **Status (2026-10-26):** plan approved; phases 0–4 done, so **the MVP is complete** (pass-through, request log,
+> exact cache, dashboard); phase 5 (real clients) next.
 
 | File | What it covers |
 |---|---|
@@ -214,7 +214,7 @@ Use the newest stable version of each when its phase starts, and let `Cargo.lock
 | Router | `linfa`, `linfa-logistic`, `ndarray` |
 | Limits | `governor` |
 | Metrics | `hdrhistogram`, `memory-stats`; Prometheus text rendered by Jetway (phase 2) |
-| Dashboard | `askama` (+ its axum integration), `rust-embed`, `plotters` (SVG backend) |
+| Dashboard | `askama` + `askama_web`, `rust-embed`; charts are hand-written SVG (phase 4: `plotters` writes fixed colours) |
 | Load generator | `rand`, `hdrhistogram` |
 | Dev | `insta` (snapshots), `proptest`, `criterion`, `tempfile` |
 | Tools (installed, not dependencies) | `cargo-deny` |
