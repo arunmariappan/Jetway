@@ -127,6 +127,9 @@ async fn a_client_that_leaves_before_the_first_byte_cancels_the_upstream_call() 
     let closed = h.fake.events.wait_disconnected(id, Duration::from_secs(4)).await.expect("upstream never closed");
     let after = closed.duration_since(left);
     assert!(after < Duration::from_millis(500), "the upstream call was cancelled {after:?} after the client left");
+    // It is still recorded, as cancelled with nothing sent.
+    let record = &h.records.wait_for(1).await[0];
+    assert_eq!((record.outcome, record.status), (Outcome::ClientCancelled, 499));
 }
 
 #[tokio::test]
